@@ -81,11 +81,13 @@ command -v node >/dev/null 2>&1 || die "node is not installed. Node 22.19 or new
 
 # A proxy that intercepts TLS fails every download below with an unknown
 # issuer, and ELECTRON_RUN_AS_NODE turns Electron into plain Node, where the
-# app's main process has no `electron.app`.
+# app's main process has no `electron.app`. NODE_OPTIONS often carries an
+# editor's --require shim that intercepts fetch, which surfaces as a bare
+# "TypeError: fetch failed" from Electron's downloader.
 if [ "${OHMYGAME_KEEP_PROXY:-0}" != "1" ]; then
   unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 fi
-unset ELECTRON_RUN_AS_NODE
+unset ELECTRON_RUN_AS_NODE NODE_OPTIONS
 
 export PATH="$(dirname "$BUN"):$PATH"
 
@@ -106,7 +108,10 @@ fi
 if [ ! -d node_modules/electron/dist ]; then
   step "Downloading Electron"
   ELECTRON_MIRROR="${ELECTRON_MIRROR:-https://npmmirror.com/mirrors/electron/}" \
-    node node_modules/electron/install.js
+    node node_modules/electron/install.js ||
+    ELECTRON_MIRROR="${ELECTRON_MIRROR:-https://npmmirror.com/mirrors/electron/}" \
+    node node_modules/electron/install.js ||
+    die "Electron did not download. Check the network, or set ELECTRON_MIRROR to a reachable mirror."
 fi
 
 # ffmpeg-static's install script needs the network too; without the binary the
