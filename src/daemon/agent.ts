@@ -232,6 +232,8 @@ export function conversationItems(entries: readonly SessionEntry[], markInterrup
       turnFinished = false;
       const parsed = parseUserPrompt(textContent(message.content));
       const details = storedPrompt?.wirePromptHash === promptHash(textContent(message.content)) ? storedPrompt : undefined;
+      // 会话运行时可能展开 Skill 文本；显示元数据仍校验哈希，运行标识绑定下一条用户消息。
+      if (typeof storedPrompt?.turnId === "string" && storedPrompt.turnId) turnId = storedPrompt.turnId;
       storedPrompt = undefined;
       const checkpoint = checkpointId;
       checkpointId = undefined;
@@ -439,6 +441,7 @@ interface ActiveTurn {
   projectId: string;
   conversationId: string;
   turnId: string;
+  stableTurnId?: boolean;
   /** The checkpoint taken before the user message of this turn, once there is one. */
   checkpointId?: string;
   /** One for each user message of the run, in order. Undefined where the snapshot failed, so the turn before has no known end. */
@@ -506,6 +509,8 @@ export class AgentManager {
   readonly #steeringPrompts = new Map<string, QueuedPrompt[]>();
   readonly #queueMutations = new Map<string, Promise<void>>();
   readonly #revisions = new Set<string>();
+  readonly #strictProjects = new Set<string>();
+  readonly #strictRuns = new Set<string>();
   /** Conversations whose session file is being archived. Nothing loads, prompts or changes them meanwhile. */
   readonly #archiving = new Set<string>();
   /** Changes in progress to an idle conversation's session (its model, plan or context), by conversation. */
@@ -751,6 +756,7 @@ export class AgentManager {
     conversation: StoredConversation,
     customInstructions?: string,
   ): Promise<{ turnId: string; result: Promise<AgentRunResult> }> {
+    if (this.#strictProjects.has(project.id) || this.#strictRuns.has(project.id)) throw new Error("Wait for the strict project task to finish");
     const key = conversationKey(project.id, conversation.summary.id);
     if (this.#activeTurns.get(key)?.ended) await this.#turnClosed(key);
     if (this.#activeTurns.has(key) || this.#revisions.has(key)) {
@@ -825,6 +831,56 @@ export class AgentManager {
     return managed.session.getSkills?.() ?? [];
   }
 
+  conversationReadiness(conversation: StoredConversation): "ready" | "running" | "closing" | "cancelling" | "waiting_approval" | "waiting_input" | "waiting_plan" | "busy" {
+    const projectId = conversation.summary.projectId;
+    const key = conversationKey(projectId, conversation.summary.id);
+    const active = this.#activeTurns.get(key);
+    if (active?.ended || (active && this.agentState(conversation).status === "idle")) return "closing";
+    if (active?.status === "cancelling") return "cancelling";
+    if (this.#approvals.get(key)?.size) return "waiting_approval";
+    if (this.#questionnaires.has(key)) return "waiting_input";
+    if (this.planState(conversation).mode !== "normal") return "waiting_plan";
+    if (active) return "running";
+    const prefix = `${projectId}:`;
+    if (this.pendingPrompts(projectId, conversation.summary.id).length || this.isProjectBusy(projectId) || [...this.#sessionChanges.keys(), ...this.#archiving].some((candidate) => candidate.startsWith(prefix))) return "busy";
+    return "ready";
+  }
+
+  async promptStrict(
+    project: ProjectState,
+    conversation: StoredConversation,
+    prompt: string,
+    turnId: string,
+    prepare: () => Promise<void>,
+  ): Promise<{ turnId: string; result: Promise<AgentRunResult | void> }> {
+    if (conversation.summary.projectId !== project.id) throw new Error("Conversation does not belong to project");
+    if (!prompt.trim()) throw new Error("Prompt must not be empty");
+    const key = conversationKey(project.id, conversation.summary.id);
+    const readiness = this.conversationReadiness(conversation);
+    if (this.#closing || readiness !== "ready") throw new Error(`Conversation is not ready: ${readiness}`);
+    this.#strictProjects.add(project.id);
+    this.#revisions.add(key);
+    try {
+      await prepare();
+      this.#revisions.delete(key);
+      this.#strictProjects.delete(project.id);
+      // 检查与启动之间不让出执行权，严格入口不经过 follow-up 分支。
+      const ready = this.conversationReadiness(conversation);
+      if (this.#closing || ready !== "ready") throw new Error(`Conversation is not ready: ${ready}`);
+      this.#strictRuns.add(project.id);
+      const result = this.#startPrompt(project, conversation, prompt, [], [], turnId)
+        .finally(() => {
+          this.#strictRuns.delete(project.id);
+          this.#flushInvalidatedProject(project.id);
+        });
+      void result.catch(() => {});
+      return { turnId, result };
+    } finally {
+      this.#revisions.delete(key);
+      this.#strictProjects.delete(project.id);
+    }
+  }
+
   prompt(
     project: ProjectState,
     conversation: StoredConversation,
@@ -833,15 +889,17 @@ export class AgentManager {
     images: PromptImage[] = [],
     mode: "normal" | "planning" | "executing" = "normal",
     mentions: PluginMention[] = [],
-    turnId = randomUUID(),
+    turnId: string = randomUUID(),
     attachmentContext = "",
     attachments: ConversationAttachment[] = [],
   ): { turnId: string; queued: boolean; result?: Promise<AgentRunResult | void> } {
     if (!prompt.trim() && images.length === 0 && !attachmentContext.trim()) throw new Error("Prompt must not be empty");
     if (this.#closing) throw new Error("Agent manager is closing");
+    if (this.#strictProjects.has(project.id)) throw new Error("Wait for the project message to start");
     const key = conversationKey(project.id, conversation.summary.id);
     if (this.#archiving.has(key)) throw new Error(ARCHIVING);
     const active = this.#activeTurns.get(key);
+    if (this.#strictRuns.has(project.id)) throw new Error("Wait for the strict project task to finish");
     if (active?.ended) {
       // The conversation reads as idle, so this is a message for a new run and not one to queue in the run
       // that is over. It waits in the conversation's queue, behind the mutation that closes the turn, and is
@@ -1167,6 +1225,7 @@ export class AgentManager {
       projectId: project.id,
       conversationId: conversation.summary.id,
       turnId,
+      stableTurnId: this.#strictRuns.has(project.id),
       prompt,
       mentions,
       images,
@@ -1835,6 +1894,7 @@ export class AgentManager {
    * while it runs or has begun and refuses it.
    */
   async #changing<T>(key: string, change: () => Promise<T>): Promise<T> {
+    if ([...this.#strictProjects, ...this.#strictRuns].some((projectId) => key.startsWith(`${projectId}:`))) throw new Error("Wait for the strict project task to finish");
     if (this.#archiving.has(key)) throw new Error(ARCHIVING);
     this.#sessionChanges.set(key, (this.#sessionChanges.get(key) ?? 0) + 1);
     try {
@@ -2364,7 +2424,7 @@ export class AgentManager {
 
   isProjectBusy(projectId: string): boolean {
     const prefix = `${projectId}:`;
-    return this.#puttingBack.has(projectId) || [...this.#activeTurns.keys(), ...this.#revisions].some((key) => key.startsWith(prefix));
+    return this.#strictProjects.has(projectId) || this.#strictRuns.has(projectId) || this.#puttingBack.has(projectId) || [...this.#activeTurns.keys(), ...this.#revisions].some((key) => key.startsWith(prefix));
   }
 
   invalidateProjectSessions(projectId: string): void {
@@ -2534,6 +2594,7 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T | typeof TOO_L
 interface StoredPromptDetails {
   version: 1;
   wirePromptHash: string;
+  turnId?: string;
   prompt: string;
   mentions: PluginMention[];
   references: PromptReference[];
@@ -2769,13 +2830,14 @@ function toPiImage(image: PromptImage): PiPromptImage {
   return { type: "image", mimeType: image.mediaType, data: image.data };
 }
 
-type StoredPromptSource = Pick<ActiveTurn, "prompt" | "mentions" | "references" | "attachments" | "attachmentContext">;
+type StoredPromptSource = Pick<ActiveTurn, "turnId" | "prompt" | "mentions" | "references" | "attachments" | "attachmentContext"> & Pick<Partial<ActiveTurn>, "stableTurnId">;
 
 function appendPromptDetails(sessionManager: CodingSession["sessionManager"], value: StoredPromptSource, wirePrompt: string): void {
-  if (!sessionManager || (value.references.length === 0 && value.attachments.length === 0 && !value.attachmentContext.trim())) return;
+  if (!sessionManager || (!value.stableTurnId && value.references.length === 0 && value.attachments.length === 0 && !value.attachmentContext.trim())) return;
   const details: StoredPromptDetails = {
     version: 1,
     wirePromptHash: promptHash(wirePrompt),
+    ...(value.stableTurnId ? { turnId: value.turnId } : {}),
     prompt: value.prompt,
     mentions: value.mentions,
     references: value.references,

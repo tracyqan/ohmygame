@@ -971,6 +971,8 @@ const zhCN: typeof en = {
     quickAccess: "快捷访问",
     newProject: "新建项目",
     projectConversations: "{{name}} 的对话",
+    projectRunning: "正在执行",
+    projectUnread: "已完成，未查看",
     editedAgo: "编辑于{{time}}",
     showQuickAccess: "展开快捷访问",
     hideQuickAccess: "收起快捷访问",

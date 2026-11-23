@@ -8,9 +8,12 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { Check } from "typebox/value";
+import type { TSchema } from "typebox";
+import type { ConversationTasks } from "./conversation-tasks.js";
 import { fileURLToPath } from "node:url";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ProjectState } from "../shared/contracts.js";
+import type { ProjectState, AgentModelRef } from "../shared/contracts.js";
 import {
   EXTERNAL_MCP_CONTRACT_VERSION,
   EXTERNAL_MCP_SERVER_NAME,
@@ -68,9 +71,65 @@ const INSTRUCTIONS = [
   "Every tool except list_projects and open_project acts on one OhMyGame project. Working in a project folder selects it; otherwise call list_projects and open_project.",
   "Generation tools return their result when it is ready within about 45 seconds; otherwise they return a jobId. Call wait_job with it until the job finishes, and do not start the same generation again.",
   "Generated files are saved in the project workspace and its asset library; results name each file's workspace-relative path. Read them with your own file tools.",
+  "Conversation tools always require an explicit project, independently of open_project. Prefer reusing an existing conversation for continued work; create_conversation starts a new one only when the person asked for it, on the model the project's most recently active conversation uses unless model is given, and get_last_conversation_model reads that model beforehand. send_conversation_message requires a unique requestId; retry only with the same ID and exact message. It can incur model charges. Busy, closing or blocked conversations are not queued. wait_conversation_task uses the returned stable taskId; waiting_approval, waiting_input and waiting_plan require the person in OhMyGame, never automatic approval. Different projects can run in parallel; one project remains serial. Interrupted/unknown does not mean success.",
 ].join("\n");
 
+const CONVERSATION_TOOLS: BridgeTool[] = [
+  { name: "list_conversations", description: "List existing conversations in an explicit project. Does not create a conversation.", inputSchema: conversationSchema() },
+  { name: "create_conversation", description: "Create an empty conversation in an explicit project. It takes the model the project's most recently active conversation uses, unless model names one; the result says which. Ask the person before starting one.", inputSchema: createConversationSchema() },
+  { name: "get_last_conversation_model", description: "Read the project's most recently active conversation and the model it uses. Pass that model to create_conversation to keep a new conversation on the same one.", inputSchema: conversationSchema() },
+  { name: "get_conversation", description: "Read an existing conversation, readiness, blocking requests and durable tasks in an explicit project.", inputSchema: conversationSchema("conversation") },
+  { name: "send_conversation_message", description: "Send text to an existing ready conversation. Strict project serialization; busy or blocked conversations are refused, never queued. requestId is durable and idempotent within the project. Does not approve requests or plans.", inputSchema: conversationSchema("send") },
+  { name: "wait_conversation_task", description: "Query a task by its stable taskId, project and conversation. Wait at most 45 seconds; blocked tasks return immediately. timeoutSeconds=0 queries without waiting.", inputSchema: conversationSchema("wait") },
+  { name: "cancel_conversation_task", description: "Request cancellation of only the specified project/conversation task. Cancellation is not complete until cleanup finishes. Never grants approval.", inputSchema: conversationSchema("cancel") },
+];
+
+function conversationSchema(kind?: "conversation" | "send" | "wait" | "cancel"): Record<string, unknown> {
+  const properties: Record<string, unknown> = {
+    project: { type: "string", minLength: 1, maxLength: 4096, description: "Explicit project ID or absolute workspace path; independent of open_project" },
+  };
+  const required = ["project"];
+  if (kind) {
+    properties.conversationId = { type: "string", minLength: 1, maxLength: 128 };
+    required.push("conversationId");
+  }
+  if (kind === "send") {
+    properties.requestId = { type: "string", minLength: 1, maxLength: 200 };
+    properties.prompt = { type: "string", minLength: 1, maxLength: 100_000, pattern: "\\S" };
+    required.push("requestId", "prompt");
+  }
+  if (kind === "wait" || kind === "cancel") {
+    properties.taskId = { type: "string", minLength: 1, maxLength: 128 };
+    required.push("taskId");
+  }
+  if (kind === "wait") properties.timeoutSeconds = { type: "integer", minimum: 0, maximum: 45 };
+  return { type: "object", properties, required, additionalProperties: false };
+}
+
+/** create_conversation's arguments: a project, and the model it may start on. */
+function createConversationSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      project: { type: "string", minLength: 1, maxLength: 4096, description: "Explicit project ID or absolute workspace path; independent of open_project" },
+      model: {
+        type: "object",
+        description: "Defaults to the model the project's most recently active conversation uses.",
+        properties: {
+          provider: { type: "string", minLength: 1, maxLength: 128 },
+          id: { type: "string", minLength: 1, maxLength: 256 },
+        },
+        required: ["provider", "id"],
+        additionalProperties: false,
+      },
+    },
+    required: ["project"],
+    additionalProperties: false,
+  };
+}
+
 const OWN_TOOLS: BridgeTool[] = [
+  ...CONVERSATION_TOOLS,
   {
     name: "list_projects",
     description:
@@ -189,6 +248,15 @@ export interface ExternalMcpAnswer {
 
 export interface ExternalMcpOptions {
   dataDirectory: string;
+  conversations?: ConversationTasks;
+  /**
+   * Starts a conversation in a project, on `model` when the caller named one
+   * and otherwise on the project's most recently active conversation's model.
+   * Throws when neither is available.
+   */
+  createConversation?: (project: ProjectState, model?: AgentModelRef) => Promise<unknown>;
+  /** The project's most recently active conversation and its model, or null. */
+  lastConversationModel?: (project: ProjectState) => Promise<unknown>;
   projects: () => ProjectState[];
   /** The project's tools for one external session; the session keeps its playtest windows. */
   tools: (project: ProjectState, sessionId: string) => ToolDefinition[] | Promise<ToolDefinition[]>;
@@ -367,7 +435,11 @@ export class ExternalMcpService {
 
   async #publishNow(): Promise<void> {
     if (!this.#enabled || !this.#url) return this.#revoke();
-    if (this.#token) return;
+    // Written on every publish, not only the first: a file that goes missing
+    // while this daemon runs (another instance's shutdown, a cleanup) would
+    // otherwise leave every client locked out until the daemon restarts.
+    // The token is kept, so a client that already has it stays connected.
+    this.#token ??= randomBytes(32).toString("base64url");
     // The launcher lists these while OhMyGame is closed, so a client starting does not start the app.
     await this.#write(this.#catalogPath, {
       version: 1,
@@ -375,7 +447,6 @@ export class ExternalMcpService {
       instructions: INSTRUCTIONS,
       tools: this.tools(),
     } satisfies ExternalMcpCatalog);
-    this.#token = randomBytes(32).toString("base64url");
     await this.#write(this.#endpointPath, {
       version: 1,
       url: this.#url,
@@ -388,10 +459,26 @@ export class ExternalMcpService {
   /** Turning the feature off or closing the daemon ends every session; running jobs keep going. */
   async #revoke(): Promise<void> {
     this.#token = undefined;
-    await rm(this.#endpointPath, { force: true });
+    // Two daemons can share a data folder; the file belongs to whichever
+    // published last, and taking down another one's endpoint is not ours to do.
+    const owner = await this.#endpointOwner();
+    if (owner === process.pid || owner === undefined) {
+      await rm(this.#endpointPath, { force: true });
+    }
     await Promise.allSettled(
       [...this.#sessions.values()].map((session) => this.#endSession(session)),
     );
+  }
+
+  /** The process that published the endpoint file, when it can be read. */
+  async #endpointOwner(): Promise<number | undefined> {
+    try {
+      const endpoint = JSON.parse(await readFile(this.#endpointPath, "utf8")) as Partial<ExternalMcpEndpoint>;
+      return typeof endpoint.pid === "number" ? endpoint.pid : undefined;
+    } catch {
+      // Missing or damaged: either way this daemon is free to clean it up.
+      return undefined;
+    }
   }
 
   async #write(file: string, value: unknown): Promise<void> {
@@ -591,6 +678,39 @@ export class ExternalMcpService {
       args && typeof args === "object" && !Array.isArray(args)
         ? (args as Record<string, unknown>)
         : {};
+    const conversationTool = CONVERSATION_TOOLS.find((tool) => tool.name === name);
+    if (conversationTool) {
+      if (!Check(conversationTool.inputSchema as TSchema, args)) return failure("Invalid conversation tool arguments");
+      try {
+        const value = input.project as string;
+        const project = this.#options.projects().find((candidate) => candidate.id === value)
+          ?? (path.isAbsolute(value) ? await this.#projectAt(value) : undefined);
+        if (!project) return failure("Project not found; specify a project ID or absolute workspace path");
+        // Starting one, and reading the model to start it on, need the app's
+        // model catalog rather than the conversation task service.
+        if (name === "create_conversation") {
+          const create = this.#options.createConversation;
+          if (!create) return failure("Conversation creation is unavailable");
+          return json(await create(project, input.model as AgentModelRef | undefined));
+        }
+        if (name === "get_last_conversation_model") {
+          const lastModel = this.#options.lastConversationModel;
+          if (!lastModel) return failure("Conversation models are unavailable");
+          return json(await lastModel(project));
+        }
+        const service = this.#options.conversations;
+        if (!service) return failure("Conversation control is unavailable");
+        if (name === "list_conversations") return json(await service.list(project));
+        const conversationId = input.conversationId as string;
+        if (name === "get_conversation") return json(await service.get(project, conversationId));
+        if (name === "send_conversation_message") return json(await service.send(project, conversationId, input.requestId as string, input.prompt as string));
+        return json(await service.task(project, conversationId, input.taskId as string,
+          name === "wait_conversation_task" ? (input.timeoutSeconds as number | undefined) ?? 45 : 0,
+          name === "cancel_conversation_task", signal));
+      } catch (cause) {
+        return failure(cause instanceof Error ? cause.message : String(cause));
+      }
+    }
     switch (name) {
       case "list_projects":
         return json({

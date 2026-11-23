@@ -499,6 +499,29 @@ it("writes a launcher script that keeps arguments with spaces and quotes intact"
   });
 });
 
+it.each(["send_conversation_message", "cancel_conversation_task"])("聊天写操作 %s 丢失响应后不自动重试", async (name) => {
+  const { service, create, call, loseResponse, requests } = await fixture();
+  await service.listening("http://127.0.0.1:1/external-mcp");
+  await service.setEnabled(true);
+  const launcher = create();
+  loseResponse(name);
+  expect(await call(launcher, name, { project: "game", conversationId: "conversation", requestId: "request", prompt: "测试", taskId: "task" })).toMatchObject({ isError: true, text: expect.stringContaining("not automatically retried") });
+  expect(requests.filter((request) => request.method === "tools/call")).toHaveLength(1);
+});
+
+it.each(["list_conversations", "get_conversation", "wait_conversation_task"])("聊天只读操作 %s 可重试且不恢复 open_project 状态", async (name) => {
+  const { service, create, call, loseResponse, requests } = await fixture();
+  await service.listening("http://127.0.0.1:1/external-mcp");
+  await service.setEnabled(true);
+  const launcher = create();
+  await call(launcher, "open_project", { project: "other" });
+  const before = requests.length;
+  loseResponse(name);
+  const result = await call(launcher, name, { project: "game", conversationId: "conversation", taskId: "task", timeoutSeconds: 0 });
+  expect(result.text).not.toContain("not automatically retried");
+  expect(requests.slice(before).map((request) => request.method)).toEqual(["tools/call", "initialize", "tools/call"]);
+});
+
 it.each(["generate_image", "canvas_initialize"])(
   "does not replay %s after execution when its response is lost",
   async (name) => {

@@ -683,7 +683,14 @@ export class AcpDriver implements NativeDriver {
     const call = this.#merge(turn, update);
     if (!call || call.bridged || call.finished) return;
     const done = call.status === "completed" || call.status === "failed";
-    if (!UNCLEAR_KINDS.has(call.kind) || done || call.content.length)
+    // CodeBuddy 先发一条 rawInput 为空的 tool_call（参数还在流式生成），
+    // 紧接着用 tool_call_update 把 command 填进去。若在参数还空时就建卡，
+    // 界面上「输入」会一直是 {}，看着像空命令。等参数到齐或调用结束再宣布。
+    const argsPending =
+      !call.rawInput ||
+      (typeof call.rawInput === "object" &&
+        Object.keys(call.rawInput as Record<string, unknown>).length === 0);
+    if ((!UNCLEAR_KINDS.has(call.kind) || done || call.content.length) && (!argsPending || done))
       this.#announce(turn, call);
     if (!call.announced) return;
     if (call.status === "in_progress") turn.sink.toolStarted(call.id);

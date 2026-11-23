@@ -34,6 +34,8 @@ import { DropdownMenu, IconButton, Kbd, Popover, Tooltip, type MenuEntry } from 
 import { useDesktopUpdate } from "./use-desktop-update.js";
 import { UserAvatar } from "./user-avatar.js";
 import { moveSidebarProject, PROJECT_COUNTS, publishSidebarProjects, setVisibleProjects, shownProjects, useSidebarProjectList, type VisibleProjects } from "./sidebar-projects.js";
+import { setViewedProject, useProjectStatus, useProjectStatusStream } from "./project-status.js";
+import { ProjectStatusBadge, projectStatusLabel, projectStatusMark, type ProjectStatusMark } from "./project-status-badge.js";
 import type { ConversationSummary, ProjectState } from "../shared/contracts.js";
 import { language, t } from "./i18n.js";
 import { hasWindowsWindowControls } from "./desktop-window-frame.js";
@@ -379,6 +381,10 @@ export function AppSidebar({ active, onNavigate }: { active?: SidebarActive; onN
   const shown = shownProjects(projects, visible);
   const reorder = useProjectReorder(shown);
   const history = useHistoryState();
+  // The icons carry each project's agent activity, so the sidebar follows the
+  // same stream the cards do: one connection, whichever page is open.
+  const { running, unread } = useProjectStatus();
+  useProjectStatusStream();
   const mac = window.ohMyGameDesktop?.platform === "darwin";
   // The Windows frame always shows them, disabled when there is nowhere to go,
   // so the top row keeps its shape from the first launch on.
@@ -446,14 +452,19 @@ export function AppSidebar({ active, onNavigate }: { active?: SidebarActive; onN
               <div {...reorder.listProps}>
                 {shown.map((project) => {
                   const open = () => { window.location.hash = projectHash(project.id); };
+                  const mark = projectStatusMark(project.id, running, unread);
+                  // Collapsed, the icon is the whole row, so its name carries the mark's meaning.
+                  const status = projectStatusLabel(mark);
+                  const label = status ? `${project.name}, ${status}` : project.name;
                   return collapsed ? (
-                    <SidebarTip key={project.id} label={project.name}>
-                      <button {...reorder.itemProps(project.id)} type="button" className="sidebar-app" aria-label={project.name} onClick={open}>
+                    <SidebarTip key={project.id} label={label}>
+                      <button {...reorder.itemProps(project.id)} type="button" className="sidebar-app" aria-label={label} onClick={open}>
                         <SidebarCover project={project} className="sidebar-app-cover" iconSize={18} />
+                        <ProjectStatusBadge status={mark} />
                       </button>
                     </SidebarTip>
                   ) : (
-                    <SidebarItem key={project.id} icon={<SidebarCover project={project} className="sidebar-cover" iconSize={12} />} label={project.name} onClick={open}
+                    <SidebarItem key={project.id} icon={<><SidebarCover project={project} className="sidebar-cover" iconSize={12} /><ProjectStatusBadge status={mark} /></>} label={project.name} onClick={open}
                       button={reorder.itemProps(project.id)} />
                   );
                 })}
@@ -498,14 +509,15 @@ export function editedAgo(value: string, now = Date.now()): string {
 }
 
 // A project in the rail.
-function RailProject({ project, open, conversations, reorder }: {
+function RailProject({ project, open, conversations, reorder, status }: {
   project: ProjectState;
   open: (hash: string) => void;
   conversations?: RailConversations;
   reorder: ProjectItemProps;
+  status?: ProjectStatusMark;
 }) {
   return <RailConversationsItem projectId={project.id} name={project.name} updatedAt={project.updatedAt}
-    cover={<SidebarCover project={project} className="sidebar-app-cover" iconSize={18} />}
+    cover={<SidebarCover project={project} className="sidebar-app-cover" iconSize={18} />} status={status}
     hash={projectHash(project.id)} conversationHash={(id) => conversationHash(project.id, id)}
     open={open} conversations={conversations} reorder={reorder} />;
 }
@@ -515,7 +527,7 @@ function RailProject({ project, open, conversations, reorder }: {
 // between them, or to another item, is one move. From the keyboard, the right
 // arrow opens the list and the arrows move through it; the left arrow or Escape
 // goes back to the icon.
-export function RailConversationsItem({ projectId, name, updatedAt, cover, hash, conversationHash: hashOf, open: openProject, conversations, reorder, className = "" }: {
+export function RailConversationsItem({ projectId, name, updatedAt, cover, hash, conversationHash: hashOf, open: openProject, conversations, reorder, status, className = "" }: {
   projectId: string;
   name: string;
   /** When it last changed, as an ISO date. */
@@ -529,6 +541,8 @@ export function RailConversationsItem({ projectId, name, updatedAt, cover, hash,
   conversations?: RailConversations;
   /** Dragging to reorder, where the rail has it. */
   reorder?: ProjectItemProps;
+  /** The agent working here, or a task done since the project was last opened. */
+  status?: ProjectStatusMark;
   className?: string;
 }) {
   const anchor = useRef<HTMLButtonElement>(null);
@@ -582,9 +596,12 @@ export function RailConversationsItem({ projectId, name, updatedAt, cover, hash,
     if (conversations) conversations.onOpen(conversationId);
     else openProject(hashOf(conversationId));
   };
+  // The icon has no text of its own, so its name carries what the mark means.
+  const statusName = projectStatusLabel(status);
   return (
     <>
-      <button {...reorder} ref={anchor} type="button" className={`sidebar-app${active ? " is-active" : ""}${className ? ` ${className}` : ""}`} aria-label={name}
+      <button {...reorder} ref={anchor} type="button" className={`sidebar-app${active ? " is-active" : ""}${className ? ` ${className}` : ""}`}
+        aria-label={statusName ? `${name}, ${statusName}` : name}
         aria-current={active ? "page" : undefined} aria-haspopup="dialog" aria-expanded={open}
         onClick={() => {
           close();
@@ -610,6 +627,7 @@ export function RailConversationsItem({ projectId, name, updatedAt, cover, hash,
           close();
         }}>
         {cover}
+        <ProjectStatusBadge status={status} />
       </button>
       <Popover open={open} onClose={close} anchor={anchor} placement="right-start" className="rail-popover"
         label={t("sidebar.projectConversations", { name })}>
@@ -674,12 +692,20 @@ export function ProjectRail({ projectId, project, conversations, onNavigate, onL
   const shown = !current || listed.some((item) => item.id === current.id) ? listed : [...listed, current];
   const reorder = useProjectReorder(shown);
   const [creating, setCreating] = useState(false);
+  const { running, unread } = useProjectStatus();
+  useProjectStatusStream();
+  // Opening the project is what clears the mark a finished task left on it.
+  useEffect(() => {
+    setViewedProject(projectId);
+    return () => setViewedProject(undefined);
+  }, [projectId]);
   const openHash = (hash: string) => onLeave(() => { window.location.hash = hash; });
   return (
     <AppRail label={t("sidebar.projectNavigation")} onNavigate={onNavigate} onLeave={onLeave}>
       <div {...reorder.listProps}>
         {shown.map((item) => (
           <RailProject key={item.id} project={item} open={openHash} reorder={reorder.itemProps(item.id)}
+            status={projectStatusMark(item.id, running, unread)}
             conversations={item.id === projectId ? conversations : undefined} />
         ))}
         {reorder.line}

@@ -986,6 +986,8 @@ const en = {
     quickAccess: "Quick access",
     newProject: "New project",
     projectConversations: "{{name}} conversations",
+    projectRunning: "Agent working",
+    projectUnread: "Finished, not opened",
     editedAgo: "Edited {{time}}",
     showQuickAccess: "Show quick access",
     hideQuickAccess: "Hide quick access",

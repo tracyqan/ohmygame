@@ -1,0 +1,32 @@
+{
+  "$schema": "https://www.ohmygame.ai/schema/plugin-2.json",
+  "id": "personal/codebuddy-agent",
+  "version": "0.3.0",
+  "engines": {
+    "ohmygame-api": "^2.4.0"
+  },
+  "displayName": "CodeBuddy Agent",
+  "description": "把 CodeBuddy CLI 作为编程 agent 接入：ACP over stdio，思考过程、工具调用和文件改动原样显示。",
+  "capabilities": {
+    "processes": [
+      "codebuddy-acp"
+    ]
+  },
+  "contributes": {
+    "agents": [
+      {
+        "id": "codebuddy",
+        "title": "CodeBuddy",
+        "command": "codebuddy-acp",
+        "args": [
+          "--acp",
+          "--permission-mode",
+          "bypassPermissions",
+          "--tool-mode",
+          "cli"
+        ],
+        "installUrl": "https://www.codebuddy.cn/docs/cli/overview"
+      }
+    ]
+  }
+}

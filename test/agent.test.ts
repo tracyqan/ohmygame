@@ -752,6 +752,49 @@ describe("shutDownExtensionsOnDispose", () => {
 });
 
 describe("AgentManager", () => {
+  it("严格入口在异步准备阶段原子占用项目，拒绝普通发送和同项目并发，允许跨项目", async () => {
+    const prepare = deferred<void>();
+    const execution = deferred<void>();
+    const session = new FakeSession();
+    session.prompt.mockImplementation(() => execution.promise);
+    const manager = new AgentManager(new RuntimeEventBus(), { createSession: async () => session });
+    const project = createProject();
+    const conversation = createConversation(project);
+    const other = { ...project, id: "project-2" };
+    const starting = manager.promptStrict(project, conversation, "测试", "stable-id", () => prepare.promise);
+    expect(manager.isProjectBusy(project.id)).toBe(true);
+    expect(() => manager.prompt(project, conversation, "排队")).toThrow();
+    await expect(manager.promptStrict(project, createConversation(project, "second"), "测试", "second", async () => {})).rejects.toThrow("busy");
+    const parallel = await manager.promptStrict(other, createConversation(other), "测试", "parallel", async () => {});
+    prepare.resolve();
+    const strict = await starting;
+    expect(() => manager.prompt(project, conversation, "排队")).toThrow();
+    expect(session.followUp).not.toHaveBeenCalled();
+    execution.resolve();
+    await Promise.all([strict.result, parallel.result]);
+    expect(manager.conversationReadiness(conversation)).toBe("ready");
+    await manager.close();
+  });
+
+  it("输入问卷和计划是显式阻塞状态，严格发送不能绕过", async () => {
+    const run = deferred<void>();
+    const session = new FakeSession();
+    session.prompt.mockImplementation(() => run.promise);
+    const manager = new AgentManager(new RuntimeEventBus(), { createSession: async () => session });
+    const project = createProject();
+    const conversation = createConversation(project);
+    const turn = manager.prompt(project, conversation, "测试", [], [], "planning");
+    const answer = manager.askQuestionnaire(project.id, conversation.summary.id, "question", { questions: [{ id: "one", prompt: "测试", options: [{ value: "a", label: "A" }, { value: "b", label: "B" }] }] });
+    expect(manager.conversationReadiness(conversation)).toBe("waiting_input");
+    await expect(manager.promptStrict(project, conversation, "测试", "blocked", async () => {})).rejects.toThrow("waiting_input");
+    manager.answerQuestionnaire(project.id, conversation.summary.id, "question", [], true);
+    await answer;
+    expect(manager.conversationReadiness(conversation)).toBe("waiting_plan");
+    run.resolve();
+    await turn.result;
+    await manager.close();
+  });
+
   it.each(["completed", "cancelled", "failed"] as const)("runs owned-resource cleanup after a %s prompt", async (outcome) => {
     const session = new FakeSession();
     const pending = deferred<void>();

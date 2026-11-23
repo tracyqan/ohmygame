@@ -18,6 +18,9 @@ const READ_ONLY_TOOLS = new Set([
   "get_project",
   "get_job",
   "wait_job",
+  "list_conversations",
+  "get_conversation",
+  "wait_conversation_task",
   "canvas_check",
   "playable_check",
 ]);
@@ -27,6 +30,11 @@ const PROJECT_INDEPENDENT_TOOLS = new Set([
   "get_job",
   "wait_job",
   "cancel_job",
+  "list_conversations",
+  "get_conversation",
+  "send_conversation_message",
+  "wait_conversation_task",
+  "cancel_conversation_task",
 ]);
 
 interface Connection {

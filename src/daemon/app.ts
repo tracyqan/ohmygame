@@ -59,10 +59,12 @@ import { LocalMultiplayerRuntime } from "./local-multiplayer.js";
 import { moveLocalGameServices, moveWorkspaceMultiplayer, readWorkspaceMultiplayer } from "./multiplayer-workspace.js";
 import { ACCOUNT_RUNTIME_IDS, isAccountRuntimeId, isAccountProfileIds, isAgentRuntimeId, nativeEffort, type AgentRuntimeId, type AnswerApprovalRequest } from "../shared/agent-runtimes.js";
 import { ConversationManager, sessionDirectory, type StoredConversation } from "./conversations.js";
+import { lastActiveConversationModel } from "./conversation-model.js";
 import { ConversationImageStore } from "./conversation-images.js";
 import { OwnedPlaytestDriver } from "./owned-playtest.js";
 import { createGameUseTool } from "./playtest-tools.js";
 import { ExternalMcpService } from "./external-mcp.js";
+import { ConversationTasks } from "./conversation-tasks.js";
 import { generateCreativeText, generateDesignDocumentMarkdown, generateDesignTable, generateProjectName } from "./text-generation.js";
 import { ProjectNaming, type ProjectNameGenerator } from "./project-naming.js";
 import { resolveCanvasTextReferences } from "./canvas-text-references.js";
@@ -763,6 +765,11 @@ export function createApp(options: AppOptions = {}) {
     const runtime = await getModelRuntime();
     return resolveModel(runtime, (await runtime.getAvailable(provider)).find((model) => model.id === id));
   };
+  /** Whether a conversation can start on this model: a coding agent's or Pi's. */
+  const modelAvailable = async (model: { provider: string; id: string }) =>
+    isAgentRuntimeId(model.provider)
+      ? !!(await agentRuntimes.model(model.provider, model.id))
+      : !!(await availableModel(model.provider, model.id));
   const publishConversationRenamed = (conversation: StoredConversation["summary"]) => {
     events.publish(
       conversation.projectId,
@@ -1052,8 +1059,38 @@ export function createApp(options: AppOptions = {}) {
     return { runtime: "web", url: previewPageUrl(url, "playtest") };
   };
   /** OhMyGame's tools for agents outside the app; playtest windows belong to their MCP session. */
+  const conversationTasks = new ConversationTasks({
+    dataDirectory, conversations, agents: () => agents,
+    prepare: async (project, conversation) => {
+      await prepareConversationPrompt(project, conversation);
+      if (projectWrites.isMutating(project.id) || publishing.has(project.id)) throw new Error("Project workspace is busy");
+      if (await checkpoints.unfinished(project)) throw new Error("Recover the interrupted file restore before continuing.");
+      await canvasStore.waitForProject(project.id);
+      await pluginWrites.settle(project);
+      if (projects.get(project.id)?.workspacePath !== project.workspacePath) throw new Error("Project changed before sending");
+      if (!await conversations.get(project, conversation.summary.id)) throw new Error("Conversation not found");
+      if (projectWrites.isMutating(project.id)) throw new Error("Project workspace is busy");
+      await projects.touch(project.id);
+    },
+  });
   const externalMcp = new ExternalMcpService({
     dataDirectory,
+    conversations: conversationTasks,
+    // An outside agent starts a conversation on the model the project's last
+    // active conversation uses, unless it names one; nothing else is invented.
+    createConversation: async (project, requested) => {
+      if (requested && !(await modelAvailable(requested))) {
+        throw new Error(`Model is not available: ${requested.provider}/${requested.id}`);
+      }
+      const inherited = requested ? undefined : await lastActiveConversationModel(conversations, project);
+      const model = requested ?? inherited?.model;
+      if (!model) {
+        throw new Error("No model to start on: pass model, or write in an existing conversation first");
+      }
+      const created = await conversations.create(project, model);
+      return { ...created.summary, model, modelSource: requested ? "explicit" : "inherited" };
+    },
+    lastConversationModel: async (project) => (await lastActiveConversationModel(conversations, project)) ?? null,
     projects: () => projects.list(),
     tools: async (project, sessionId) => createAgentTools(
       project, tools, projects, undefined, undefined,
@@ -3673,6 +3710,18 @@ export function createApp(options: AppOptions = {}) {
     return model;
   }
 
+  async function prepareConversationPrompt(project: ProjectState, conversation: StoredConversation, locale: "en" | "zh-CN" = "en") {
+    let selectedModel = await conversations.model(project, conversation);
+    if (selectedModel && !modelProviderEnabled(selectedModel.provider)) throw new Error("The selected provider is disabled. Enable it in Settings to continue.");
+    if (!selectedModel && !agents.sessionRuntime(project.id, conversation.summary.id)) selectedModel = await startConversationOnDefault(project, conversation);
+    agents.restorePlanState(conversation, await conversations.planState(project, conversation));
+    if (project.pluginType) {
+      const ready = await pluginServices.projectReady(project.workspacePath, project.pluginType.id, locale);
+      if (!ready.ready) throw Object.assign(new Error(ready.message ?? "Finish setting up this project in its panel first"), { code: "project-not-ready", panel: ready.panel });
+    }
+    return selectedModel;
+  }
+
   app.post<{ Params: { projectId: string }; Body: CreateConversationRequest }>(
     "/projects/:projectId/conversations",
     async (request, reply) => {
@@ -4159,11 +4208,14 @@ export function createApp(options: AppOptions = {}) {
       if (!project) return reply.code(404).send({ error: "Project not found" });
       const conversation = await conversations.get(project, request.params.conversationId);
       if (!conversation) return reply.code(404).send({ error: "Conversation not found" });
-      let selectedModel = await conversations.model(project, conversation);
-      if (selectedModel && !modelProviderEnabled(selectedModel.provider)) return reply.code(409).send({ error: "The selected provider is disabled. Enable it in Settings to continue." });
       if (!request.body?.prompt?.trim() && !request.body?.images?.length && !request.body?.attachments?.length) return reply.code(400).send({ error: "Prompt or attachment is required" });
-      // A conversation started before any model was available runs on the one its picker shows now.
-      if (!selectedModel && !agents.sessionRuntime(project.id, conversation.summary.id)) selectedModel = await startConversationOnDefault(project, conversation);
+      let selectedModel;
+      try {
+        selectedModel = await prepareConversationPrompt(project, conversation, request.query.locale === "zh-CN" ? "zh-CN" : "en");
+      } catch (cause) {
+        const error = cause as Error & { code?: string; panel?: string };
+        return reply.code(409).send({ error: error.message, ...(error.code ? { code: error.code, panel: error.panel } : {}) });
+      }
       let mentions;
       try {
         mentions = await validateMentions(request.body.mentions ?? []);
@@ -4178,11 +4230,6 @@ export function createApp(options: AppOptions = {}) {
         const resolved = await pluginServices.resolve(project.workspacePath).catch(() => undefined);
         const off = mentions.find((mention) => !(resolved?.ok && resolved.plugins.some((plugin) => plugin.id === `${mention.marketplaceId}/${mention.name}` && plugin.status === "active")));
         if (off) return reply.code(409).send({ error: `Turn ${off.displayName} on in this project first` });
-      }
-      // A plugin type can hold prompts back until its project is set up, such as signed in and bound.
-      if (project.pluginType) {
-        const ready = await pluginServices.projectReady(project.workspacePath, project.pluginType.id, request.query.locale === "zh-CN" ? "zh-CN" : "en");
-        if (!ready.ready) return reply.code(409).send({ error: ready.message ?? "Finish setting up this project in its panel first", code: "project-not-ready", panel: ready.panel });
       }
       let references;
       try {

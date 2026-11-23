@@ -541,27 +541,72 @@
 
 /* a project as an app icon: its cover cropped to a rounded square */
 .sidebar-app {
+  position: relative;
   display: block;
   flex: none;
   width: 32px;
   height: 32px;
   padding: 0;
-  overflow: hidden;
+  /* The status badge sits at the corner, outside the cover's crop. */
+  overflow: visible;
   border: 0;
   border-radius: 8px;
   background: var(--color-surface-raised);
-  opacity: 0.72;
   cursor: pointer;
+}
+
+/* Dimming the cover rather than the row leaves the badge at full strength. */
+.sidebar-app > .sidebar-app-cover {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: inherit;
+  opacity: 0.72;
   transition: opacity var(--duration-fast);
 }
 
-.sidebar-app-cover {
-  width: 100%;
-  height: 100%;
+.sidebar-app:hover > .sidebar-app-cover,
+.sidebar-app.is-active > .sidebar-app-cover {
+  opacity: 1;
 }
 
-.sidebar-app:hover {
+/* Where a project has no cover to dim, the row itself carries it. */
+.sidebar-app-new {
+  color: var(--color-text-secondary);
+  opacity: 0.72;
+  transition: opacity var(--duration-fast);
+}
+
+.sidebar-app-new:hover {
   opacity: 1;
+}
+
+/* A project's agent activity at its icon's corner: a spinner while it works,
+   a dot once a task finished and the project has not been opened since. */
+.sidebar-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.sidebar-badge.is-unread {
+  width: 9px;
+  height: 9px;
+  background: var(--color-danger);
+  /* The ring keeps the dot readable over any cover. */
+  box-shadow: 0 0 0 2px var(--color-surface);
+}
+
+.sidebar-badge.is-running {
+  width: 15px;
+  height: 15px;
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  box-shadow: 0 0 0 2px var(--color-surface);
 }
 
 .sidebar-app:focus-visible {

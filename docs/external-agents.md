@@ -19,14 +19,15 @@ OhMyGame's tools for one conversation.
 People who already work in a coding agent have chosen and paid for its model.
 What they lack is what only OhMyGame has: the media providers configured in
 Providers, the Design and Asset Canvas, and the playtest window.
-OhMyGame offers exactly those as tools; the external agent plans and writes
-the code.
+OhMyGame offers those as tools; the external agent can plan and write code
+itself, or explicitly continue an existing OhMyGame conversation through the
+project-scoped conversation tools below.
 
 Not in scope, and why:
 
-- **Delegating a task to OhMyGame's own agent.** It nests two agent loops,
-  hides progress, and bills two models for one task. It can be added later as
-  another tool on the same server.
+- **Automatic conversation creation or approval.** The person chooses an
+  existing conversation. Approval, input and plan decisions remain in OhMyGame;
+  the external client can observe blocking state but cannot approve it.
 - **A record of external calls in the app.** Generated files already appear in
   the workspace, the Asset Library and the canvas; a conversation record would
   change the conversation model for little gain.
@@ -64,7 +65,9 @@ Not in scope, and why:
 4. **Off by default, no extra approvals.** Turning the feature on and
    adding the server to a client is the person's consent. Each client already asks before
    running MCP tools under its own permission settings, and OhMyGame's own
-   agent runs these tools without a prompt, so OhMyGame adds no approval step.
+   agent runs these tools without a prompt, so OhMyGame adds no extra approval
+   step for the capability call. A delegated conversation still honors all of
+   its runtime's approval, questionnaire and plan gates; MCP never approves them.
 
 5. **Clients are configured with their own commands.** Settings shows
    `claude mcp add` and `codex mcp add` rather than a configuration file
@@ -116,6 +119,7 @@ Files in `<dataDirectory>/external-mcp/`:
 | `settings.json` | Whether the feature is on.                                                                    |
 | `endpoint.json` | URL, token, contract version and daemon `pid`, POSIX mode `0600`; only while the daemon runs. |
 | `tools.json`    | The public tool list and instructions, kept so the launcher works while OhMyGame is closed.   |
+| `conversation-tasks/<taskId>.json` | Versioned durable request/task/project/conversation binding and final outcome, mode `0600`. Written atomically and file-synced before model execution; contains a message hash, not its text. |
 | `app.json`      | The desktop app's `pid` while it runs, written before its daemon starts.                      |
 
 - The token is random for each daemon launch and is never stored elsewhere.
@@ -196,13 +200,17 @@ and answers with JSON; nothing is streamed, so `GET` returns 405.
 
 ## Public tools
 
-Every session lists the same tools, whichever project it uses. A tool the
-bound project does not have returns an error that says why.
+Every session lists the same tools, whichever project it uses. A capability
+the bound project does not have returns an error that says why. Conversation
+tools instead require their own explicit project on every call.
 
 | Tool                                                                        | Notes                                                                       |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | `list_projects`, `open_project`, `get_project`                              | Project ID, name, type and workspace folder; `open_project` by ID or folder |
 | `get_job`, `wait_job`, `cancel_job`                                         | Generation jobs, see below                                                  |
+| `list_conversations`, `get_conversation` | Explicit `project`; detail also requires `conversationId`. Readiness, history and task bindings. |
+| `send_conversation_message` | Explicit `project`, `conversationId`, `requestId`, `prompt`; existing conversations only; strict non-queued send. |
+| `wait_conversation_task`, `cancel_conversation_task` | Explicit `project`, `conversationId`, `taskId`; wait accepts integer `timeoutSeconds` from 0 to 45 (default 45). |
 | `generate_image`, `generate_video`, `generate_3d_asset`, `animate_3d_asset` | Run as jobs                                                                 |
 | `generate_audio`                                                            | Run as jobs                                                                 |
 | `canvas_check`, `canvas_initialize`, `generate_canvas_media`                | `generate_canvas_media` runs as a job                                       |
@@ -235,6 +243,53 @@ close when the session ends, changes project, or its project is deleted.
 - `test/external-mcp.test.ts` asserts the listed tool names, so a change to
   the public list fails until it is made deliberately. Update the Skill with
   it.
+
+### Existing conversations and durable tasks
+
+1. Call `list_conversations` with `project` (project ID or an absolute path
+   inside its workspace), then `get_conversation` with that project and an
+   explicit `conversationId`. These tools do not use or change `open_project`.
+2. Continue work in the **same existing conversation**. Send text with a new
+   `requestId` per intended message. Repeating that ID within the project with
+   identical conversation and text returns the same `taskId`; changing either
+   is an error. No tool creates a conversation or picks one implicitly.
+3. Send returns a stable `taskId`, `turnId`, `projectId`, `conversationId` and
+   status. Use `wait_conversation_task`, including after reconnecting, rather
+   than sending again. The launcher's lost-response retries include only
+   `list_conversations`, `get_conversation` and `wait_conversation_task`; send
+   and cancel are not automatically replayed. After a lost send response,
+   query `get_conversation` for its request ID, or explicitly repeat the exact
+   request ID and message to collect its durable record.
+4. A project is reserved atomically during preparation and execution. Different
+   projects may proceed concurrently; the same project refuses another send
+   while busy (including an app turn, restore, or final cleanup). It never
+   converts an MCP send into a follow-up. Ordinary app sends also cannot queue
+   into the strict task. Preparation reuses the app's provider/default model,
+   stored plan restoration and plugin project-ready checks, plus workspace
+   recovery, canvas and plugin-write protection. Only text messages are exposed.
+5. `running`, `starting`, `closing`, and `cancelling` are not success.
+   `waiting_approval`, `waiting_input` and `waiting_plan` are blocking states;
+   waiting returns immediately and the person must decide in OhMyGame. There
+   is no approve/answer/execute-plan MCP tool. A cancellation only denies
+   unanswered approval requests and requests abort; `cancelled` follows cleanup.
+   `succeeded` is recorded only after the run promise and final cleanup finish,
+   never just because an `agent.completed` event or idle state appeared.
+6. Request/task bindings and terminal outcomes survive daemon restarts. A
+   task without a durable final outcome becomes `interrupted`, even if model
+   output appears in history: its actual outcome is unknown, not success.
+   An unknown task ID reports `unknown`; do not automatically resend either.
+   New strict turns persist their live `turnId` with prompt metadata so stored
+   history can still be associated with the task rather than guessed from text
+   or timestamps. Old history remains readable without this optional metadata.
+7. Task records currently have no automatic retention limit. Damaged or newer
+   task records refuse control instead of being overwritten. This is local
+   single-daemon persistence, not a distributed exactly-once execution promise.
+   The external token remains scoped to `/external-mcp`; no private app token
+   is exposed, and conversation tools are never registered with internal agents.
+
+Delegation can incur model charges in addition to the outside client's cost.
+Automated fixture tests verify the actual service, agent manager and storage
+paths; they do **not** demonstrate execution by a real paid model.
 
 ### Generation jobs
 

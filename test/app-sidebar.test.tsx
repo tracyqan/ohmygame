@@ -55,6 +55,8 @@ vi.doMock(path.resolve("src/renderer/api.ts"), () => ({
   ],
   waitForRuntime: async () => undefined,
   getProjectCover: async () => undefined,
+  // The sidebar follows the activity stream; this rail test never sends one.
+  streamProjectActivity: async () => undefined,
 }));
 const { PageFrame } = await import("../src/renderer/page-frame.js");
 const { ProjectRail } = await import("../src/renderer/app-sidebar.js");
