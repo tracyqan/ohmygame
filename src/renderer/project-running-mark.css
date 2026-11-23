@@ -1,0 +1,22 @@
+/* A project whose agent is working: the spinner takes the corner an unread
+   dot would use, so the two never stack. */
+.project-running-mark {
+  display: inline-grid;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  place-items: center;
+  color: var(--text-secondary);
+}
+
+.sidebar-app:has(> .project-running-mark) {
+  position: relative;
+}
+
+.sidebar-app > .project-running-mark {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  border-radius: 50%;
+  background: var(--surface);
+}

@@ -4,7 +4,10 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthState } from "../src/renderer/auth.js";
-import type { ProjectState } from "../src/shared/contracts.js";
+import type { ProjectAgentActivity, ProjectState } from "../src/shared/contracts.js";
+
+// The agent activity stream: a test pushes what the daemon would send.
+const activityListeners = new Set<(snapshot: { activity: ProjectAgentActivity[]; names: ProjectState[] }) => void>();
 
 const auth = vi.hoisted(() => ({
   state: { status: "signed-out" } as AuthState,
@@ -55,6 +58,11 @@ vi.doMock(path.resolve("src/renderer/api.ts"), () => ({
   ],
   waitForRuntime: async () => undefined,
   getProjectCover: async () => undefined,
+  streamProjectActivity: async (signal: AbortSignal, onSnapshot: (snapshot: unknown) => void) => {
+    activityListeners.add(onSnapshot as never);
+    await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    activityListeners.delete(onSnapshot as never);
+  },
 }));
 const { PageFrame } = await import("../src/renderer/page-frame.js");
 const { ProjectRail } = await import("../src/renderer/app-sidebar.js");
@@ -389,6 +397,22 @@ describe("in a project", () => {
     await act(async () => button("Old Garden")!.click());
     expect(onLeave).toHaveBeenCalledTimes(2);
     expect(window.location.hash).toBe("#/projects/old");
+  });
+
+  it("shows a spinner on the project whose agent is working", async () => {
+    const push = async (activity: ProjectAgentActivity[]) => act(async () => {
+      for (const listener of activityListeners) listener({ activity, names: [] });
+    });
+    expect(document.querySelector(".project-running-mark")).toBeNull();
+
+    await push([{ projectId: "old", status: "running" }]);
+    const mark = document.querySelector(".project-running-mark");
+    expect(mark).not.toBeNull();
+    // The icon has no text, so the mark's meaning rides on its description.
+    expect(mark!.closest("button")?.getAttribute("aria-description")).toBe("Agent working");
+
+    await push([]);
+    expect(document.querySelector(".project-running-mark")).toBeNull();
   });
 
   it("lists a project's conversations on hover, newest first", async () => {

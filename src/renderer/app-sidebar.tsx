@@ -34,6 +34,8 @@ import { DropdownMenu, IconButton, Kbd, Popover, Tooltip, type MenuEntry } from 
 import { useDesktopUpdate } from "./use-desktop-update.js";
 import { UserAvatar } from "./user-avatar.js";
 import { attentionLabel, ProjectAttentionMark, useProjectAttention } from "./project-attention.js";
+import { ProjectRunningMark, runningLabel } from "./project-running-mark.js";
+import { useProjectActivity } from "./use-project-activity.js";
 import { moveSidebarProject, PROJECT_COUNTS, publishSidebarProjects, setVisibleProjects, shownProjects, useSidebarProjectList, type VisibleProjects } from "./sidebar-projects.js";
 import type { ConversationSummary, ProjectState } from "../shared/contracts.js";
 import { language, t } from "./i18n.js";
@@ -382,6 +384,9 @@ export function AppSidebar({ active, onNavigate }: { active?: SidebarActive; onN
   const shown = shownProjects(projects, visible);
   const reorder = useProjectReorder(shown);
   const history = useHistoryState();
+  // A project whose agent is working shows a spinner where its unread dot
+  // would be, so the rail answers "who is busy" without opening anything.
+  const running = useProjectActivity(true);
   const mac = window.ohMyGameDesktop?.platform === "darwin";
   // The Windows frame always shows them, disabled when there is nowhere to go,
   // so the top row keeps its shape from the first launch on.
@@ -448,7 +453,7 @@ export function AppSidebar({ active, onNavigate }: { active?: SidebarActive; onN
             {quickAccessOpen ? (
               <div {...reorder.listProps}>
                 {shown.map((project) => <QuickAccessProject key={project.id} project={project} collapsed={collapsed}
-                  reorder={reorder.itemProps(project.id)} />)}
+                  running={running.has(project.id)} reorder={reorder.itemProps(project.id)} />)}
                 {reorder.line}
               </div>
             ) : null}
@@ -468,11 +473,13 @@ export function AppSidebar({ active, onNavigate }: { active?: SidebarActive; onN
   );
 }
 
-function QuickAccessProject({ project, collapsed, reorder }: { project: ProjectState; collapsed: boolean; reorder: ProjectItemProps }) {
+function QuickAccessProject({ project, collapsed, running, reorder }: { project: ProjectState; collapsed: boolean; running: boolean; reorder: ProjectItemProps }) {
   const attention = useProjectAttention(project.id);
   const open = () => { window.location.hash = projectHash(project.id); };
-  const button = { ...reorder, "aria-description": attentionLabel(attention) };
-  const mark = <ProjectAttentionMark attention={attention} />;
+  const description = [attentionLabel(attention), running ? runningLabel() : undefined].filter(Boolean).join(", ") || undefined;
+  const button = { ...reorder, "aria-description": description };
+  // Working wins the corner: it is the state the project is in right now.
+  const mark = running ? <ProjectRunningMark /> : <ProjectAttentionMark attention={attention} />;
   if (!collapsed) return <SidebarItem icon={<SidebarCover project={project} className="sidebar-cover" iconSize={12} />}
     label={project.name} onClick={open} button={button} trailing={mark} />;
   return <SidebarTip label={project.name}>
@@ -505,14 +512,15 @@ export function editedAgo(value: string, now = Date.now()): string {
 }
 
 // A project in the rail.
-function RailProject({ project, open, conversations, reorder }: {
+function RailProject({ project, open, conversations, reorder, running }: {
   project: ProjectState;
   open: (hash: string) => void;
   conversations?: RailConversations;
   reorder: ProjectItemProps;
+  running: boolean;
 }) {
   return <RailConversationsItem projectId={project.id} name={project.name} updatedAt={project.updatedAt}
-    cover={<SidebarCover project={project} className="sidebar-app-cover" iconSize={18} />}
+    cover={<SidebarCover project={project} className="sidebar-app-cover" iconSize={18} />} running={running}
     hash={projectHash(project.id)} conversationHash={(id) => conversationHash(project.id, id)}
     open={open} conversations={conversations} reorder={reorder} />;
 }
@@ -522,7 +530,7 @@ function RailProject({ project, open, conversations, reorder }: {
 // between them, or to another item, is one move. From the keyboard, the right
 // arrow opens the list and the arrows move through it; the left arrow or Escape
 // goes back to the icon.
-export function RailConversationsItem({ projectId, name, updatedAt, cover, hash, conversationHash: hashOf, open: openProject, conversations, reorder, className = "" }: {
+export function RailConversationsItem({ projectId, name, updatedAt, cover, hash, conversationHash: hashOf, open: openProject, conversations, reorder, running = false, className = "" }: {
   projectId: string;
   name: string;
   /** When it last changed, as an ISO date. */
@@ -536,6 +544,8 @@ export function RailConversationsItem({ projectId, name, updatedAt, cover, hash,
   conversations?: RailConversations;
   /** Dragging to reorder, where the rail has it. */
   reorder?: ProjectItemProps;
+  /** The agent working in this project, shown in place of its attention mark. */
+  running?: boolean;
   className?: string;
 }) {
   const attention = useProjectAttention(projectId);
@@ -593,7 +603,8 @@ export function RailConversationsItem({ projectId, name, updatedAt, cover, hash,
   return (
     <>
       <button {...reorder} ref={anchor} type="button" className={`sidebar-app${active ? " is-active" : ""}${className ? ` ${className}` : ""}`} aria-label={name}
-        aria-description={attentionLabel(attention)} aria-current={active ? "page" : undefined} aria-haspopup="dialog" aria-expanded={open}
+        aria-description={[attentionLabel(attention), running ? runningLabel() : undefined].filter(Boolean).join(", ") || undefined}
+        aria-current={active ? "page" : undefined} aria-haspopup="dialog" aria-expanded={open}
         onClick={() => {
           close();
           if (!active) openProject(hash);
@@ -618,7 +629,7 @@ export function RailConversationsItem({ projectId, name, updatedAt, cover, hash,
           close();
         }}>
         {cover}
-        <ProjectAttentionMark attention={attention} />
+        {running ? <ProjectRunningMark /> : <ProjectAttentionMark attention={attention} />}
       </button>
       <Popover open={open} onClose={close} anchor={anchor} placement="right-start" className="rail-popover"
         label={t("sidebar.projectConversations", { name })}>
@@ -695,12 +706,15 @@ export function ProjectRail({ projectId, project, conversations, onNavigate, onL
   const shown = !current || listed.some((item) => item.id === current.id) ? listed : [...listed, current];
   const reorder = useProjectReorder(shown);
   const [creating, setCreating] = useState(false);
+  // The rail inside a project tells which other projects are working.
+  const running = useProjectActivity(true);
   const openHash = (hash: string) => onLeave(() => { window.location.hash = hash; });
   return (
     <AppRail label={t("sidebar.projectNavigation")} onNavigate={onNavigate} onLeave={onLeave}>
       <div {...reorder.listProps}>
         {shown.map((item) => (
           <RailProject key={item.id} project={item} open={openHash} reorder={reorder.itemProps(item.id)}
+            running={running.has(item.id)}
             conversations={item.id === projectId ? conversations : undefined} />
         ))}
         {reorder.line}
