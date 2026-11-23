@@ -62,12 +62,12 @@ Not in scope, and why:
    configuration. The `ohmygame-mcp` launcher speaks stdio to the client and
    HTTP to the daemon.
 
-4. **Off by default, no extra approvals.** Turning the feature on and
-   adding the server to a client is the person's consent. Each client already asks before
-   running MCP tools under its own permission settings, and OhMyGame's own
-   agent runs these tools without a prompt, so OhMyGame adds no extra approval
-   step for the capability call. A delegated conversation still honors all of
-   its runtime's approval, questionnaire and plan gates; MCP never approves them.
+4. **Off by default.** Turning the feature on and adding the server to a
+   client is the person's consent. Each client applies its own tool permissions.
+   Active project plugins may additionally gate tools with `tool.beforeCall`.
+   A denial or hook failure blocks the call; `ask` is refused because an
+   external call has no active OhMyGame conversation for approval. The agent
+   receives an explanation. Completed calls emit read-only `tool.afterCall`.
 
 5. **Clients are configured with their own commands.** Settings shows
    `claude mcp add` and `codex mcp add` rather than a configuration file
@@ -209,13 +209,42 @@ tools instead require their own explicit project on every call.
 | `list_projects`, `open_project`, `get_project`                              | Project ID, name, type and workspace folder; `open_project` by ID or folder |
 | `get_job`, `wait_job`, `cancel_job`                                         | Generation jobs, see below                                                  |
 | `list_conversations`, `get_conversation` | Explicit `project`; detail also requires `conversationId`. Readiness, history and task bindings. |
+| `create_conversation` | Explicit `project`, optional `model`; keeps the project's last active conversation's model unless `model` names one. |
+| `get_last_conversation_model` | Explicit `project`; the conversation last written in and the model it uses, or `null` |
 | `send_conversation_message` | Explicit `project`, `conversationId`, `requestId`, `prompt`; existing conversations only; strict non-queued send. |
 | `wait_conversation_task`, `cancel_conversation_task` | Explicit `project`, `conversationId`, `taskId`; wait accepts integer `timeoutSeconds` from 0 to 45 (default 45). |
-| `generate_image`, `generate_video`, `generate_3d_asset`, `animate_3d_asset` | Run as jobs                                                                 |
+| `inspect_media_models` | Read the effective image, audio or video model and its capabilities. Pass `alternatives: true` or `search` to discover other connected models. For audio, pass the intended `kind`. |
+| `list_background_removal_models` | Read available processing models without submitting an image |
+| `generate_image`, `remove_image_background`, `generate_video`, `generate_3d_asset`, `animate_3d_asset` | Run as jobs                                                                 |
 | `generate_audio`                                                            | Run as jobs                                                                 |
 | `canvas_check`, `canvas_initialize`, `generate_canvas_media`                | `generate_canvas_media` runs as a job                                       |
 | `game_use`                                                                  | Needs the desktop app and a project with a game preview; opens a window     |
+| `browser_use` | Uses the selected project’s visible Browser panel in the desktop app; shared tabs remain open when the MCP session ends |
+| `panel_screenshot` | Captures one of the selected project’s plugin panels as the desktop app shows it; needs the project open there |
+| `web_fetch` | Reads HTTP(S) HTML or text without browser cookies or JavaScript |
+| `project_guide` | Read-only authoring contracts: `topic: "panels"` or `"scene-media"`; available in every project |
+| `library_search` | Read-only: the person's saved Library assets, or with `source` a turned-on plugin's Library source; see [runtime](runtime.md#library) |
+| `library_use` | Copies one of the person's saved Library assets into the project and records its credit; a source's result is added from the Library page instead |
 | `playable_add_node`, `playable_check`                                       | Interactive Story projects only                                             |
+
+OhMyGame and external agents can call `inspect_media_models` when they need
+the current model or its capabilities. It and generation choose the model the
+same way: the call's model override, then the project default, the global
+default, and the first connected model.
+For `generate_image`, an aspect ratio or a resolution alone is enough. The app
+fills in the other from the model and rejects unsupported dimensions before
+submitting, listing the supported ones. A model that sets its own dimensions,
+such as Codex Image, generates at its own size. `generate_audio` uses signed integer percentages for speed
+(`0` is normal, `8` is 8% faster) and accepts formats from the selected
+model's catalog. Saved canvas nodes use their own model and settings.
+
+When the selected model leaves out an option it doesn't take, such as `loop`
+or `pitch` for audio, or the dimensions for an image model that sets its own,
+the result says so in a `Not applied by the selected model:` line and lists
+the options in `ignored`. An argument a tool's schema doesn't name, such as
+`aspect_ratio` for `aspectRatio`, does not fail the call; the result adds an
+`Unrecognized arguments had no effect:` line and lists it in `unknownFields`.
+A failed call's error includes the same line.
 
 `game_use` lists every operation and input any runtime takes. A project's own
 tool accepts the subset its runtime supports: a story's player has no

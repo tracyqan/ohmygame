@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmod, link, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { createApp } from "../src/daemon/app.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createApp, type AppOptions } from "../src/daemon/app.js";
 import type { CheckpointChangeItem, ProjectState } from "../src/shared/contracts.js";
 import { pluginUiRefusal, readPluginUiRequest } from "../src/shared/plugin-ui-protocol.js";
 import { projectHistory, projectUsage } from "../src/daemon/plugin-data.js";
@@ -20,10 +21,15 @@ afterEach(async () => {
 });
 
 /** A project using a plugin with a panel that asks for `project.files` at `level`, if any. */
-async function setup(level?: "read" | "write", id = "acme/files", capabilities: Record<string, unknown> = {}) {
+async function setup(
+  level?: "read" | "write",
+  id = "acme/files",
+  capabilities: Record<string, unknown> = {},
+  { projectFiles, createSession, ui }: { projectFiles?: string[]; createSession?: AppOptions["createSession"]; ui?: object } = {},
+) {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), "ohmygame-plugin-files-"));
   const source = await mkdtemp(path.join(tmpdir(), "ohmygame-plugin-files-source-"));
-  const app = createApp({ dataDirectory });
+  const app = createApp({ dataDirectory, ...(createSession ? { createSession } : {}) });
   fixtures.push({ app, directories: [dataDirectory, source] });
   await app.ready();
   await mkdir(path.join(source, ".ohmygame-plugin"), { recursive: true });
@@ -34,6 +40,8 @@ async function setup(level?: "read" | "write", id = "acme/files", capabilities: 
     id, version: "1.0.0", engines: { "ohmygame-api": "^2.2.0" }, displayName: "Files", description: "Uses files.", icon: "./ui/icon.svg",
     ...(level || Object.keys(capabilities).length ? { capabilities: { ...(level ? { "project.files": level } : {}), ...capabilities } } : {}),
     contributes: { panels: [{ id: "main", title: "Main", area: "right", entry: "./ui/panel.html" }] },
+    ...(projectFiles ? { projectFiles } : {}),
+    ...(ui ? { ui } : {}),
   }));
   const payload = { source: { type: "directory", path: source } };
   const inspected = await app.inject({ method: "POST", url: "/plugin-sources/inspect", payload });
@@ -47,7 +55,31 @@ async function setup(level?: "read" | "write", id = "acme/files", capabilities: 
   const workspace = (...parts: string[]) => path.join(project.workspacePath, ...parts);
   const put = (filePath: string, body: string | Buffer) =>
     app.inject({ method: "PUT", url: `${base}/content?path=${encodeURIComponent(filePath)}`, headers: { "content-type": "application/octet-stream" }, payload: body });
-  return { app, project, base, workspace, put };
+  return { app, project, base, workspace, put, dataDirectory };
+}
+
+/** A session whose turn runs until `finish` is called, so the project stays busy. */
+function blockingSession() {
+  let finish = () => {};
+  const createSession: AppOptions["createSession"] = async () => ({
+    messages: [],
+    prompt: () => new Promise<void>((resolve) => { finish = resolve; }),
+    followUp: async () => {},
+    steer: async () => {},
+    clearQueue: () => ({ steering: [], followUp: [] }),
+    abort: async () => { finish(); },
+    dispose: () => {},
+    subscribe: () => () => {},
+  });
+  return { createSession, finish: () => finish() };
+}
+
+/** Starts an agent turn in the project, and waits until plugin writes are refused. */
+async function startTurn(app: ReturnType<typeof createApp>, project: ProjectState, put: (filePath: string, body: string) => Promise<{ statusCode: number }>) {
+  const conversation = (await app.inject({ method: "POST", url: `/projects/${project.id}/conversations` })).json<{ id: string }>();
+  const turn = await app.inject({ method: "POST", url: `/projects/${project.id}/conversations/${conversation.id}/turns`, payload: { prompt: "Work" } });
+  expect(turn.statusCode, turn.body).toBeLessThan(300);
+  await expect.poll(async () => (await put("probe.txt", "x")).statusCode).toBe(409);
 }
 
 describe("plugin page files API", () => {
@@ -103,6 +135,116 @@ describe("plugin page files API", () => {
     await writeFile(changes, JSON.stringify({ ...saved, pending: { id: "left", plugin: "acme/files", action: "files:write", title: "Left over", before: saved.changes.at(-1)!.after, at: new Date().toISOString() } }));
     const listed = await app.inject({ method: "GET", url: `/projects/${project.id}/%70lugin-changes` });
     expect(listed.statusCode).toBe(200);
+  });
+
+  it("keeps a page's changes to its own folders while an agent works, and lands them as one change once it's done", async () => {
+    const session = blockingSession();
+    const { app, project, base, workspace, put } = await setup("write", "acme/files", {}, { projectFiles: ["./levels/"], createSession: session.createSession });
+    await mkdir(workspace("levels"), { recursive: true });
+    await writeFile(workspace("levels/old.json"), "old");
+    await writeFile(workspace("levels/keep.json"), "keep");
+    await writeFile(workspace(".gitignore"), "*.log\n");
+    await startTurn(app, project, put);
+
+    const written = await put("levels/new/one.json", '{"level":1}');
+    expect(written.statusCode, written.body).toBe(200);
+    expect(written.json()).toEqual({ value: "levels/new/one.json" });
+    expect(await readFile(workspace("levels/new/one.json"), "utf8").catch(() => "missing")).toBe("missing");
+    expect((await put("levels/keep.json", "first")).statusCode).toBe(200);
+    expect((await put("levels/keep.json", "second")).statusCode).toBe(200);
+    expect((await app.inject({ method: "DELETE", url: `${base}?path=levels/old.json` })).statusCode).toBe(200);
+    // Elsewhere, and anything but a write or a delete, still waits for the agent.
+    expect((await put("notes.txt", "x")).statusCode).toBe(409);
+    expect((await app.inject({ method: "POST", url: `${base}/folder`, payload: { path: "levels/empty" } })).statusCode).toBe(409);
+    expect((await app.inject({ method: "DELETE", url: `${base}?path=levels/missing.json` })).statusCode).toBe(404);
+    expect((await put("levels/.hidden", "x")).statusCode).toBe(403);
+    // What it couldn't change once the agent is done, it can't now.
+    expect((await put("levels/trace.log", "x")).statusCode).toBe(403);
+    expect((await put("levels", "x")).statusCode).toBe(400);
+
+    // The page reads back what it saved.
+    const read = await app.inject({ method: "GET", url: `${base}/content?path=levels/new/one.json` });
+    expect(read.statusCode).toBe(200);
+    expect(read.headers["content-type"]).toBe("application/octet-stream");
+    expect(read.body).toBe('{"level":1}');
+    expect((await app.inject({ method: "GET", url: `${base}/content?path=levels/keep.json` })).body).toBe("second");
+    expect((await app.inject({ method: "GET", url: `${base}/content?path=levels/old.json` })).statusCode).toBe(404);
+    const listed = (await app.inject({ method: "GET", url: `${base}?path=levels&recursive=true` })).json<{ entries: Array<{ path: string; kind: string; size?: number }> }>();
+    expect(listed.entries.map((entry) => entry.path).sort()).toEqual(["levels/keep.json", "levels/new", "levels/new/one.json"]);
+    expect(listed.entries.find((entry) => entry.path === "levels/keep.json")).toMatchObject({ kind: "file", size: 6 });
+    // A folder that so far only waits is there too.
+    expect((await app.inject({ method: "GET", url: `${base}?path=levels/new` })).json().entries.map((entry: { path: string }) => entry.path)).toEqual(["levels/new/one.json"]);
+    expect((await app.inject({ method: "GET", url: `${base}?path=levels/nowhere` })).statusCode).toBe(404);
+
+    session.finish();
+    // They land one after another as one change, which is recorded once all of them have.
+    const changes = async () => (await app.inject({ method: "GET", url: `/projects/${project.id}/plugin-changes` })).json<Array<{ id: string; plugin: string; title: string; changed: string[] }>>();
+    await expect.poll(async () => (await changes())[0]?.title, { timeout: 10_000 }).toBe("Save 3 changes made during the agent's turn");
+    expect(await readFile(workspace("levels/new/one.json"), "utf8")).toBe('{"level":1}');
+    expect(await readFile(workspace("levels/keep.json"), "utf8")).toBe("second");
+    expect(await readFile(workspace("levels/old.json"), "utf8").catch(() => "gone")).toBe("gone");
+    await expect.poll(async () => (await readdir(path.join(project.storagePath!, "plugin-pending")).catch(() => [])).length === 0 || (await readdir(path.join(project.storagePath!, "plugin-pending/acme")).catch(() => [])).length === 0).toBe(true);
+    const history = await changes();
+    expect(history[0]).toMatchObject({ plugin: "acme/files", title: "Save 3 changes made during the agent's turn" });
+    expect(history[0]!.changed.sort()).toEqual(["levels/keep.json", "levels/new/one.json", "levels/old.json"]);
+    // It undoes as one.
+    expect((await app.inject({ method: "POST", url: `/projects/${project.id}/plugin-changes/${history[0]!.id}/undo` })).statusCode).toBe(200);
+    expect(await readFile(workspace("levels/old.json"), "utf8")).toBe("old");
+    expect(await readFile(workspace("levels/keep.json"), "utf8")).toBe("keep");
+  });
+
+  it("opens a page with a token for its project's modules, which serves them while the project uses the plugin", async () => {
+    const { app, project, workspace } = await setup("read", "acme/files", {}, { ui: { projectModules: ["./fx/"] } });
+    await mkdir(workspace("fx"), { recursive: true });
+    await writeFile(workspace("fx/burst.js"), "export default 1;");
+    const list = async () => (await app.inject({ method: "GET", url: `/projects/${project.id}/plugin-panels` })).json<Array<{ url: string }>>()[0]!.url;
+    const url = new URL(await list());
+    const token = url.searchParams.get("modules")!;
+    expect(token).toMatch(/^[A-Za-z0-9_-]{24}$/);
+    // The project's id is no part of it, and listing the panels again gives the same one.
+    expect(url.search).not.toContain(project.id);
+    expect(new URL(await list()).searchParams.get("modules")).toBe(token);
+    const csp = (await fetch(url)).headers.get("content-security-policy")!;
+    const modules = `${url.origin}/_modules/${token}/`;
+    expect(csp).toContain(modules);
+    const module = await fetch(`${modules}r1/fx/burst.js`);
+    expect(module.status).toBe(200);
+    expect(await module.text()).toBe("export default 1;");
+    // Turned off in the project, its pages import nothing more, once the page server checks again.
+    expect((await app.inject({ method: "PUT", url: `/projects/${project.id}/plugins/acme/files`, payload: { on: false } })).statusCode).toBe(204);
+    vi.useFakeTimers({ now: Date.now() + 1_500, toFake: ["Date"] });
+    try {
+      expect((await fetch(`${modules}r2/fx/burst.js`)).status).toBe(404);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts a page's panel opens toward its plugin's limit, for panels it has", async () => {
+    const { app, project } = await setup("read");
+    const open = (panel: string) => app.inject({ method: "POST", url: `/projects/${project.id}/plugin-panel-open`, payload: { plugin: "acme/files", panel } });
+    expect((await open("elsewhere")).json()).toMatchObject({ error: "acme/files has no panel named elsewhere" });
+    for (let index = 0; index < 5; index++) expect((await open("main")).statusCode).toBe(204);
+    const refused = await open("main");
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ error: "This plugin is opening too many panels" });
+    // Only a plugin the project uses.
+    expect((await app.inject({ method: "POST", url: `/projects/${project.id}/plugin-panel-open`, payload: { plugin: "acme/other", panel: "main" } })).json().error).toContain("doesn't use acme/other");
+  });
+
+  it("lands what a page saved during a turn after the app restarts", async () => {
+    const session = blockingSession();
+    const { app, project, workspace, put, dataDirectory } = await setup("write", "acme/files", {}, { projectFiles: ["./levels"], createSession: session.createSession });
+    await startTurn(app, project, put);
+    expect((await put("levels/one.json", "1")).statusCode).toBe(200);
+    // Waiting writes are kept beside the project's data, so a damaged list is left for the person rather than replaced.
+    await app.close();
+    const restarted = createApp({ dataDirectory });
+    fixtures.push({ app: restarted, directories: [] });
+    await restarted.ready();
+    await expect.poll(() => readFile(workspace("levels/one.json"), "utf8").catch(() => "missing"), { timeout: 10_000 }).toBe("1");
+    const history = (await restarted.inject({ method: "GET", url: `/projects/${project.id}/plugin-changes` })).json<Array<{ title: string }>>();
+    expect(history[0]!.title).toBe("Write levels/one.json");
   });
 
   it("keeps pages away from hidden files, links, the project file and an agent's instructions", async () => {
@@ -334,6 +476,50 @@ describe("plugin page files protocol", () => {
     expect(pluginUiRefusal("files.delete", { "project.files": "write" })).toBeUndefined();
   });
 
+  it("adds what a page made to the person's Library under its plugin's name, as often as it may", async () => {
+    const { app, project } = await setup(undefined, "acme/art", { library: true });
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1, 2, 255]);
+    const add = (name: string, body: Buffer = png, plugin = "acme/art", prompt?: string) => app.inject({
+      method: "POST",
+      url: `/projects/${project.id}/plugin-library/${plugin}?${new URLSearchParams({ name, ...(prompt ? { prompt } : {}) })}`,
+      headers: { "content-type": "application/octet-stream" },
+      payload: body,
+    });
+    const added = await add("ricochet.png", png, "acme/art", "an impact that bounces");
+    expect(added.statusCode, added.body).toBe(201);
+    expect(added.json()).toMatchObject({ name: "ricochet.png", mediaType: "image", origin: "generated", saved: true, addedBy: "acme/art", prompt: "an impact that bounces" });
+    const listed = (await app.inject({ method: "GET", url: "/library/assets" })).json<Array<{ id: string; addedBy?: string }>>();
+    expect(listed.find((asset) => asset.id === added.json().id)).toMatchObject({ addedBy: "acme/art" });
+    // Named with its type, which its data is.
+    expect((await add("ricochet")).json().error).toContain("name the file with its type");
+    expect((await add("notes.txt")).statusCode).toBe(400);
+    expect((await add("ricochet.jpg")).json().error).toContain("isn't the image/jpeg its name says");
+    // An SVG can hold a script, which the Library would serve as the app's own.
+    expect((await add("burst.svg", Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'))).json().error).toContain("not SVG");
+    expect((await add("../../ricochet.png")).statusCode).toBe(201);
+    // Only a plugin the project uses, that asks for it.
+    expect((await add("x.png", png, "acme/other")).statusCode).toBe(403);
+    // A Plugin Builder preview doesn't add to the person's Library.
+    expect((await add("x.png", png, "_draft/0f8e7c1a-0000-4000-8000-000000000000")).json().error).toContain("Plugin Builder preview");
+    // At most 20 a minute, counting only what was added: the two above make 2.
+    for (let index = 2; index < 20; index++) expect((await add(`${index}.png`)).statusCode).toBe(201);
+    const refused = await add("one-more.png");
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json().error).toContain("at most 20 files");
+  });
+
+  it("refuses a page's Library additions without the library capability", async () => {
+    const { app, project } = await setup("write", "acme/files");
+    const added = await app.inject({ method: "POST", url: `/projects/${project.id}/plugin-library/acme/files?name=a.png`, headers: { "content-type": "application/octet-stream" }, payload: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) });
+    expect(added.statusCode).toBe(403);
+    expect(pluginUiRefusal("library.add", {})).toBe("library.add needs the library capability");
+    const ask = (params: unknown) => readPluginUiRequest({ id: 1, method: "library.add", params });
+    expect(ask({ name: "a.png", data: new Blob([new Uint8Array(4)]) })).toMatchObject({ ok: true });
+    expect(ask({ name: "a.png", data: new Blob([]) })).toMatchObject({ ok: false, error: "library.add needs the file, as a Blob" });
+    expect(ask({ name: "fx/a.png", data: new Blob([new Uint8Array(4)]) })).toMatchObject({ ok: false });
+    expect(ask({ name: "a.png", data: new Blob([new Uint8Array(4)]), prompt: "x".repeat(1_001) })).toMatchObject({ ok: false });
+  });
+
   it("takes a blob or text to write, and paths for the rest", () => {
     const ask = (method: string, params: unknown) => readPluginUiRequest({ id: 1, method, params });
     expect(ask("files.write", { path: "a.png", data: new Blob([new Uint8Array(300 * 1024)]) })).toMatchObject({ ok: true });
@@ -362,6 +548,32 @@ describe("project panels", () => {
     return { app, project, folder, panels };
   }
 
+  it("makes a panel into a plugin in a new Plugin Builder workspace, whose draft passes its checks", async () => {
+    const { app, project, folder } = await panelSetup({ title: "Stats", area: "left", capabilities: { "project.files": "read" }, net: ["api.example.com"] });
+    await mkdir(path.join(folder, "lib"), { recursive: true });
+    await writeFile(path.join(folder, "lib/main.js"), "export {};");
+    await symlink(path.join(project.workspacePath, "ohmygame.json"), path.join(folder, "linked.json")).catch(() => {});
+    const made = await app.inject({ method: "POST", url: `/projects/${project.id}/project-panels/stats/plugin` });
+    expect(made.statusCode, made.body).toBe(201);
+    const { id, prompt } = made.json<{ id: string; prompt: string }>();
+    // The agent is asked to finish it, and to move what a plugin page can't do into native code.
+    expect(prompt).toContain('made from the project panel "Stats"');
+    expect(prompt).toContain("api.example.com");
+    const draft = (await app.inject({ method: "GET", url: `/plugins/setup-sessions/${id}/draft` })).json<{ path: string; errors: string[]; plugin: { id: string; asks: string[]; adds: { panels: string[]; commands: string[] } }; files: Array<{ path: string }> }>();
+    expect(draft.errors).toEqual([]);
+    expect(draft).toMatchObject({ path: "stats", plugin: { id: "personal/stats", asks: ["project.files:read"], adds: { panels: ["Stats"] } } });
+    expect(draft.files.map((file) => file.path).sort()).toEqual([".ohmygame-plugin/plugin.json", "assets/icon.svg", "ui/index.html", "ui/lib/main.js"]);
+    // Another takes the next free name: one no other workspace's draft has, and none installed.
+    const made2 = (await app.inject({ method: "POST", url: `/projects/${project.id}/project-panels/stats/plugin` })).json<{ id: string }>();
+    expect((await app.inject({ method: "GET", url: `/plugins/setup-sessions/${made2.id}/draft` })).json()).toMatchObject({ path: "stats-2", plugin: { id: "personal/stats-2" } });
+    const installed = await app.inject({ method: "POST", url: `/plugins/setup-sessions/${id}/install`, payload: { revision: (await app.inject({ method: "GET", url: `/plugins/setup-sessions/${id}/draft` })).json().revision } });
+    expect(installed.statusCode, installed.body).toBe(200);
+    expect((await app.inject({ method: "DELETE", url: `/plugins/setup-sessions/${id}` })).statusCode).toBe(204);
+    const made3 = (await app.inject({ method: "POST", url: `/projects/${project.id}/project-panels/stats/plugin` })).json<{ id: string }>();
+    expect((await app.inject({ method: "GET", url: `/plugins/setup-sessions/${made3.id}/draft` })).json()).toMatchObject({ plugin: { id: "personal/stats-3" } });
+    expect((await app.inject({ method: "POST", url: `/projects/${project.id}/project-panels/missing/plugin` })).statusCode).toBe(404);
+  });
+
   it("runs a panel only once the person allows what it asks for, and again when that changes", async () => {
     const { app, project, folder, panels } = await panelSetup();
     await writeFile(path.join(project.workspacePath, "notes.txt"), "hello");
@@ -379,6 +591,10 @@ describe("project panels", () => {
     const page = await fetch(allowed!.url!);
     expect(await page.text()).toBe("<p>stats</p>");
     expect(page.headers.get("content-security-policy")).toContain(`/_project/${project.id}/stats/`);
+    // It reads its own folder's files, and no other.
+    expect(page.headers.get("content-security-policy")).toContain(`connect-src ${new URL(allowed!.url!).origin}/_project/${project.id}/stats/;`);
+    // Only a sandboxed page reads it: the project's files aren't anyone's to fetch.
+    expect(page.headers.get("access-control-allow-origin")).toBe("null");
     expect((await app.inject({ method: "GET", url: files })).body).toBe("hello");
     // Its folder's files only, without following a link out of it.
     await symlink(path.join(project.workspacePath, "notes.txt"), path.join(folder, "linked.txt"));
@@ -438,5 +654,167 @@ describe("project panels", () => {
     await expect(projectPanelFetch({ net: ["api.example.com"] }, { url: "https://api.example.com/big" },
       answer(new Response(new Uint8Array(5 * 1024 * 1024 + 1))))).rejects.toThrow("larger than 5 MB");
     await expect(projectPanelFetch({ net: ["api.example.com"] }, { url: "https://api.example.com:8443/" }, answer(new Response("")))).rejects.toThrow("port");
+  });
+});
+
+describe("Plugin Builder drafts", () => {
+  it("previews a draft's panels in its workspace under a draft id, with the playground as their project", async () => {
+    const dataDirectory = await mkdtemp(path.join(tmpdir(), "ohmygame-draft-panels-"));
+    // A workspace whose agent has handed over a draft, as the app finds it when it starts.
+    const first = createApp({ dataDirectory });
+    await first.ready();
+    const created = await first.inject({ method: "POST", url: "/plugins/setup-sessions", payload: {} });
+    expect(created.statusCode, created.body).toBe(201);
+    const { id, projectId } = created.json<{ id: string; projectId: string }>();
+    await first.close();
+    const workspace = path.join(dataDirectory, "plugin-setup", id, "workspace");
+    const draftRoot = path.join(workspace, "review");
+    await mkdir(path.join(draftRoot, ".ohmygame-plugin"), { recursive: true });
+    await mkdir(path.join(draftRoot, "ui"), { recursive: true });
+    await writeFile(path.join(draftRoot, "ui/panel.html"), "<p>review</p>");
+    await writeFile(path.join(draftRoot, "ui/icon.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\"/>");
+    await writeFile(path.join(draftRoot, "native.js"), "export function activate() {}");
+    await writeFile(path.join(draftRoot, ".ohmygame-plugin/plugin.json"), JSON.stringify({
+      id: "personal/review", version: "1.0.0", engines: { "ohmygame-api": "^2.2.0" }, displayName: "Review", description: "Reviews.", icon: "./ui/icon.svg",
+      capabilities: { "project.files": "write" },
+      ui: { projectModules: ["./fx/"] },
+      contributes: { panels: [{ id: "main", title: "Review", area: "right", entry: "./ui/panel.html" }] },
+    }));
+    const stateFile = path.join(dataDirectory, "plugin-setup", id, "state.json");
+    await writeFile(stateFile, JSON.stringify({ ...JSON.parse(await readFile(stateFile, "utf8")), draftPath: "review" }));
+    const app = createApp({ dataDirectory });
+    fixtures.push({ app, directories: [dataDirectory] });
+    await app.ready();
+    const plugin = `_draft/${id}`;
+
+    const panels = (await app.inject({ method: "GET", url: `/projects/${projectId}/plugin-panels` })).json<Array<{ plugin: string; draft?: boolean; url?: string; commands: string[] }>>();
+    const draft = panels.find((panel) => panel.draft);
+    expect(draft).toMatchObject({ plugin, commands: [] });
+    expect(draft!.url).toContain(`/_draft/${id}/ui/panel.html?revision=`);
+    const page = await fetch(draft!.url!);
+    expect(await page.text()).toBe("<p>review</p>");
+    expect(page.headers.get("content-security-policy")).toContain(`/_draft/${id}/`);
+    expect(page.headers.get("content-security-policy")).toContain(`connect-src ${new URL(draft!.url!).origin}/_draft/${id}/;`);
+    expect(page.headers.get("access-control-allow-origin")).toBe("null");
+    // It imports modules from the playground, as an installed plugin's page does from its project.
+    const modules = `${new URL(draft!.url!).origin}/_modules/${new URL(draft!.url!).searchParams.get("modules")}/`;
+    expect(page.headers.get("content-security-policy")).toContain(modules);
+    await mkdir(path.join(workspace, "playground/fx"), { recursive: true });
+    await writeFile(path.join(workspace, "playground/fx/burst.js"), "export default 1;");
+    expect(await (await fetch(`${modules}r1/fx/burst.js`)).text()).toBe("export default 1;");
+    // Its panel's folder and assets only: never its code, or another workspace's draft.
+    expect((await fetch(new URL("../native.js", draft!.url!))).status).toBe(404);
+    expect((await fetch(draft!.url!.replace(id, randomUUID()))).status).toBe(404);
+
+    // Its project is the workspace's playground, so what it writes never changes the draft.
+    const written = await app.inject({ method: "PUT", url: `/projects/${projectId}/plugin-files/${plugin}/content?path=ui/panel.html`, headers: { "content-type": "application/octet-stream" }, payload: "notes" });
+    expect(written.statusCode, written.body).toBe(200);
+    expect(await readFile(path.join(workspace, "playground/ui/panel.html"), "utf8")).toBe("notes");
+    expect(await readFile(path.join(workspace, "review/ui/panel.html"), "utf8")).toBe("<p>review</p>");
+    // What the workspace's snapshots leave out can't change, as Undo couldn't bring it back.
+    await writeFile(path.join(workspace, ".gitignore"), "playground/private/\n");
+    expect((await app.inject({ method: "PUT", url: `/projects/${projectId}/plugin-files/${plugin}/content?path=private/a.txt`, headers: { "content-type": "application/octet-stream" }, payload: "x" })).statusCode).toBe(403);
+    // A playground replaced by a link reaches nothing.
+    await rm(path.join(workspace, "playground"), { recursive: true });
+    await symlink(dataDirectory, path.join(workspace, "playground"));
+    expect((await app.inject({ method: "GET", url: `/projects/${projectId}/plugin-files/${plugin}?recursive=true` })).statusCode).toBe(403);
+    await rm(path.join(workspace, "playground"));
+    // Another project shows no draft, and can't reach one.
+    const game = (await app.inject({ method: "POST", url: "/projects", payload: { name: "Game" } })).json<ProjectState>();
+    expect((await app.inject({ method: "GET", url: `/projects/${game.id}/plugin-files/${plugin}/content?path=ui/panel.html` })).statusCode).toBe(403);
+
+    // What its page reports is kept under the draft's id, apart from the installed plugin's.
+    expect((await app.inject({ method: "POST", url: `/plugin-store/${plugin}/log`, payload: { text: "Review: x is undefined" } })).statusCode).toBe(204);
+    expect((await app.inject({ method: "GET", url: `/plugin-store/${plugin}/log` })).json().entries).toMatchObject([{ source: "panel", text: "Review: x is undefined" }]);
+    expect((await app.inject({ method: "GET", url: "/plugin-store/personal/review/log" })).json().entries).toEqual([]);
+    expect((await app.inject({ method: "POST", url: `/plugin-store/_draft/${randomUUID()}/log`, payload: { text: "x" } })).statusCode).toBe(404);
+    // A capture answer nobody waits for is refused, and so is one that isn't an image.
+    expect((await app.inject({ method: "POST", url: `/plugins/setup-sessions/${id}/captures/${randomUUID()}`, payload: { error: "late" } })).statusCode).toBe(404);
+    expect((await app.inject({ method: "POST", url: `/plugins/setup-sessions/${id}/captures/${randomUUID()}`, payload: { image: { panel: "main", mediaType: "text/html", data: "AAAA", width: 1, height: 1, theme: "dark" } } })).statusCode).toBe(400);
+    // A draft broken since its page loaded still reports.
+    await writeFile(path.join(draftRoot, ".ohmygame-plugin/plugin.json"), "{}");
+    expect((await app.inject({ method: "GET", url: `/projects/${projectId}/plugin-panels` })).json()).toEqual([]);
+    expect((await app.inject({ method: "POST", url: `/plugin-store/${plugin}/log`, payload: { text: "Review: broken" } })).statusCode).toBe(204);
+  });
+
+  it("runs a draft's code for the person only once they allow it, as one change they can undo, kept as failed when it fails", async () => {
+    const dataDirectory = await mkdtemp(path.join(tmpdir(), "ohmygame-draft-run-"));
+    const first = createApp({ dataDirectory });
+    await first.ready();
+    const { id, projectId } = (await first.inject({ method: "POST", url: "/plugins/setup-sessions", payload: {} })).json<{ id: string; projectId: string }>();
+    await first.close();
+    const draftRoot = path.join(dataDirectory, "plugin-setup", id, "workspace", "notes");
+    await mkdir(path.join(draftRoot, ".ohmygame-plugin"), { recursive: true });
+    await writeFile(path.join(draftRoot, "index.mjs"), `import { writeFile } from "node:fs/promises";
+import path from "node:path";
+export function activate(context) {
+  context.registerCommand("note", async () => { await writeFile(path.join(context.project.folder, "note.txt"), "hi"); throw new Error("after writing"); });
+  context.registerCommand("query", async (input) => ({ items: ["news about " + (input?.topic ?? "everything")] }));
+  context.registerCommand("save", async () => { await writeFile(path.join(context.project.folder, "saved.txt"), "saved"); return { saved: true }; });
+}
+`);
+    await writeFile(path.join(draftRoot, ".ohmygame-plugin/plugin.json"), JSON.stringify({
+      id: "personal/notes", version: "1.0.0", engines: { "ohmygame-api": "^2.2.0" }, displayName: "Notes", description: "Notes.",
+      capabilities: { native: true }, entrypoints: { native: "./index.mjs" },
+      contributes: {
+        panels: [{ id: "main", title: "Notes", area: "right", entry: "./panel.html" }],
+        commands: [
+          { id: "note", title: "Note", run: { native: "note" } },
+          { id: "query", title: "Query", run: { native: "query", input: "./query.json", changesFiles: false } },
+          { id: "save", title: "Save", run: { native: "save" } },
+          { id: "open", title: "Open", run: { openPanel: "main" } },
+        ],
+      },
+      icon: "./icon.svg",
+    }));
+    await writeFile(path.join(draftRoot, "panel.html"), "<p>notes</p>");
+    await writeFile(path.join(draftRoot, "icon.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"/>");
+    await writeFile(path.join(draftRoot, "query.json"), JSON.stringify({ type: "object", properties: { topic: { type: "string" } }, additionalProperties: false }));
+    const stateFile = path.join(dataDirectory, "plugin-setup", id, "state.json");
+    await writeFile(stateFile, JSON.stringify({ ...JSON.parse(await readFile(stateFile, "utf8")), draftPath: "notes" }));
+    const app = createApp({ dataDirectory });
+    fixtures.push({ app, directories: [dataDirectory] });
+    await app.ready();
+    const run = () => app.inject({ method: "POST", url: `/plugins/setup-sessions/${id}/run`, payload: { command: "note" } });
+    const changes = async () => (await app.inject({ method: "GET", url: `/projects/${projectId}/plugin-changes` })).json<Array<{ plugin: string; failed?: string; changed: string[] }>>();
+
+    // Refused before anything is recorded.
+    const refused = await run();
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error).toContain("hasn't allowed");
+    expect(await changes()).toEqual([]);
+    // Nor does its page run its code before.
+    const pageRefused = await app.inject({ method: "POST", url: `/plugins/setup-sessions/${id}/page-commands`, payload: { command: "query" } });
+    expect(pageRefused.statusCode).toBe(409);
+    expect(pageRefused.json().error).toContain("hasn't allowed");
+
+    const draft = (await app.inject({ method: "GET", url: `/plugins/setup-sessions/${id}/draft` })).json<{ plugin: { native: { key: string } }; runAllowed: boolean }>();
+    expect(draft.runAllowed).toBe(false);
+    expect((await app.inject({ method: "POST", url: `/plugins/setup-sessions/${id}/allow-run`, payload: { key: draft.plugin.native.key } })).statusCode).toBe(200);
+    const failed = await run();
+    expect(failed.statusCode, failed.body).toBe(200);
+    expect(failed.json()).toMatchObject({ ok: false, error: expect.stringContaining("after writing") });
+    expect(await changes()).toMatchObject([{ plugin: `_draft/${id}`, failed: expect.stringContaining("after writing"), changed: ["playground/note.txt"] }]);
+
+    // Its page runs its own commands in the preview, as an installed plugin's page does.
+    const [panel] = (await app.inject({ method: "GET", url: `/projects/${projectId}/plugin-panels` })).json<Array<{ url: string; commands: string[]; draftCommands: Array<{ id: string; run: object }> }>>();
+    // Allowed, its page has another address, so one open while it was refused loads again.
+    expect(panel!.url).toMatch(/\?revision=[0-9a-f]{16}-run$/);
+    expect(panel!.commands).toEqual(["note", "query", "save", "open"]);
+    expect(panel!.draftCommands.map((command) => command.id)).toEqual([`_draft/${id}:note`, `_draft/${id}:query`, `_draft/${id}:save`, `_draft/${id}:open`]);
+    const page = (command: string, input?: unknown) => app.inject({ method: "POST", url: `/plugins/setup-sessions/${id}/page-commands`, payload: input === undefined ? { command } : { command, input } });
+    // One that never changes files runs as is, with nothing to undo.
+    const queried = await page("query", { topic: "games" });
+    expect(queried.statusCode, queried.body).toBe(200);
+    expect(queried.json()).toEqual({ result: { items: ["news about games"] } });
+    expect(await changes()).toHaveLength(1);
+    expect((await page("query", { colour: "red" })).json().error).toContain("input");
+    // One that may is a change to undo.
+    const saved = await page("save");
+    expect(saved.json()).toMatchObject({ result: { saved: true }, change: { changed: ["playground/saved.txt"] } });
+    expect((await page("note")).statusCode).toBe(409);
+    // The app runs its own kinds, and only commands the draft has run here.
+    expect((await page("open")).json().error).toContain("runs in the app");
+    expect((await page("missing")).statusCode).toBe(404);
   });
 });

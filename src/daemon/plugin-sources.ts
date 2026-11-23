@@ -6,12 +6,12 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { customNpmRegistry, NPM_PLUGIN_PACKAGE, PLUGIN_ARCHIVE_MAX_BYTES, PLUGIN_NPM_REGISTRIES, type PluginNpmRegistry, type PluginOrigin, type PluginAddSource, type PluginAddPreview, type PluginSourceUpdate, isNewerPluginVersion, isPluginVersion, npmPackagePluginIds } from "../shared/plugins.js";
 import { PluginPackError, stagePublished, unpackPlugin } from "./plugin-pack.js";
-import { isAppWidePlugin } from "../shared/plugin-manifest.js";
+import { isAppWidePlugin, pluginApiIssue } from "../shared/plugin-manifest.js";
 import { indexPluginPackage, localizePluginString, pluginAdds, type PluginIndexEntry } from "./plugin-index.js";
 import { assertAddablePlugin, type PluginServices } from "./plugin-services.js";
 import { PluginMarketError, type MarketRelease, type PluginMarket } from "./plugin-market.js";
 import { downloadRelease } from "./plugin-releases.js";
-import { capabilityGrants, missingGrants } from "./project-plugins.js";
+import { capabilityGrants, missingGrants, updatesWithoutAsking } from "./project-plugins.js";
 
 // The Add plugin dialog's sources. Each gives a package in a temporary folder,
 // which is read and checked but never run: npm's install scripts don't apply.
@@ -89,16 +89,27 @@ interface FetchedPackage {
   removeAfter?: string;
 }
 
+/**
+ * The versions the person removed can't be read. Quiet updates stop until it
+ * can, and nothing replaces it; removing a plugin goes ahead.
+ */
+export class DeclinedUnreadableError extends Error {}
+
+/** The shape of `declined-updates.json`. */
+const DECLINED_VERSION = 1;
+
 export class PluginSources {
   #origins: Promise<Record<string, PluginOrigin>> | undefined;
   /** Checking a package may join, recording its origin and installing it happen as one step. */
   #adding: Promise<unknown> = Promise.resolve();
+  /** Changes to the versions the person removed, one at a time. */
+  #declinedWrites: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly services: PluginServices,
     private readonly originsPath: string,
     private readonly network: PluginSourceNetwork = { fetch: (...request) => fetch(...request), download: downloadRelease },
-    private readonly market?: Pick<PluginMarket, "release">,
+    private readonly market?: Pick<PluginMarket, "release"> & Partial<Pick<PluginMarket, "vouchedRelease">>,
   ) {}
 
   inspect(source: PluginAddSource, locale: string | undefined): Promise<PluginAddPreview> {
@@ -148,6 +159,199 @@ export class PluginSources {
       return undefined;
     }));
     return found.filter((update) => update !== undefined);
+  }
+
+  /**
+   * Installs the updates `updates` found that need nothing from the person:
+   * from npm, listed by a freshly read market index that vouches for that
+   * version, not at or below a version the person removed, and quiet as
+   * `#quietUpdate` decides. The rest wait for the person, as does one that
+   * can't be fetched now. Returns what it installed; `onError` hears why one
+   * that qualified failed.
+   */
+  async updateQuietly(updates: readonly PluginSourceUpdate[], onError?: (id: string, cause: unknown) => void): Promise<PluginIndexEntry[]> {
+    const installed: PluginIndexEntry[] = [];
+    for (const update of updates) {
+      const source = update.source;
+      if (source.type !== "npm" || !update.version) continue;
+      const version = update.version;
+      try {
+        if (await this.#wentBackFrom(source.name, version)) continue;
+        // Only a version the market has looked at, by an index read just now, so one it blocked since isn't taken.
+        if (!(await this.market?.vouchedRelease?.(source.name, version))) continue;
+        const entry = await this.#reading(() => this.#fetch(source), (fetched, entry) => {
+          const origin = fetched.origin;
+          if (origin?.type !== "npm" || entry.id !== update.id || entry.version !== update.version) return Promise.resolve(undefined);
+          const run = this.#adding.then(() => this.#updateQuietly(fetched.root, entry, origin, async () => {}));
+          this.#adding = run.catch(() => undefined);
+          return run;
+        });
+        if (entry) installed.push(entry);
+      } catch (cause) {
+        // Offline, blocked, or the package changed: the person's update, or the next start, tries again.
+        onError?.(update.id, cause);
+      }
+    }
+    return installed;
+  }
+
+  /**
+   * Records that the person removed a version of a plugin from npm, so no
+   * update brings it, or an older one, back by itself. It's kept by npm
+   * package, so another package that later has the id starts afresh, and
+   * adding a version from that package again forgets what's at or below it.
+   * Only npm versions update by themselves, so others need nothing kept.
+   */
+  async decline(id: string, version: string): Promise<void> {
+    const origin = await this.origin(id, version);
+    if (origin?.type !== "npm") return;
+    await this.#changeDeclined((declined) => {
+      declined[origin.package] = [...new Set([...(declined[origin.package] ?? []), version])].sort();
+    });
+  }
+
+  /**
+   * Whether the person went back from this version, or a newer one, of an
+   * npm package. A file that can't be read says nothing, so it throws and no
+   * update happens by itself.
+   */
+  async #wentBackFrom(npmPackage: string, version: string): Promise<boolean> {
+    return ((await this.#loadDeclined())[npmPackage] ?? []).some((removed) => !isNewerPluginVersion(version, removed));
+  }
+
+  /** Versions the person removed, by npm package. Missing is none; unreadable throws, so nothing replaces it. */
+  async #loadDeclined(): Promise<Record<string, string[]>> {
+    let text: string;
+    try {
+      text = await readFile(this.#declinedFile, "utf8");
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return {};
+      throw new DeclinedUnreadableError(`${this.#declinedFile} can't be read: ${(cause as Error).message}`);
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      throw new DeclinedUnreadableError(`${this.#declinedFile} isn't valid JSON`);
+    }
+    const plugins = value && typeof value === "object" && !Array.isArray(value) && (value as { version?: unknown }).version === DECLINED_VERSION
+      ? (value as { plugins?: unknown }).plugins : undefined;
+    if (!plugins || typeof plugins !== "object" || Array.isArray(plugins))
+      throw new DeclinedUnreadableError(`${this.#declinedFile} isn't a version-${DECLINED_VERSION} file this app can read`);
+    return Object.fromEntries(Object.entries(plugins).flatMap(([id, versions]) =>
+      Array.isArray(versions) ? [[id, versions.filter((item): item is string => typeof item === "string" && isPluginVersion(item))]] : []));
+  }
+
+  /** Changes the removed versions one writer at a time. */
+  #changeDeclined(change: (declined: Record<string, string[]>) => void): Promise<void> {
+    const run = this.#declinedWrites.then(async () => {
+      const declined = await this.#loadDeclined();
+      change(declined);
+      await mkdir(path.dirname(this.#declinedFile), { recursive: true });
+      const temporary = `${this.#declinedFile}.${randomUUID()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify({ version: DECLINED_VERSION, plugins: declined }, null, 2)}\n`);
+      await rename(temporary, this.#declinedFile);
+    });
+    this.#declinedWrites = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Where versions the person removed are kept, beside the origins. */
+  get #declinedFile(): string {
+    return path.join(path.dirname(this.originsPath), "declined-updates.json");
+  }
+
+  /**
+   * Host-curated offline seed. Unlike Add, it never changes switches or
+   * grants. Once a managed copy exists it belongs to the person, so the seed
+   * leaves it alone, unless `mayUpdate` (the app seeded it and the person
+   * hasn't removed it) and the pinned version is a quiet update
+   * (`#quietUpdate`). Returns undefined when it installs nothing.
+   */
+  installPreinstalled(root: string, origin: Extract<PluginOrigin, { type: "npm" }>, before: () => Promise<void>, { mayUpdate = false }: { mayUpdate?: boolean } = {}): Promise<PluginIndexEntry | undefined> {
+    const run = this.#adding.then(async () => {
+      await this.services.ready();
+      const entry = await validPackage(root);
+      if (origin.registry !== "npmjs" || !origin.package.startsWith("@ohmygame/")
+        || !npmPackagePluginIds(origin.package)?.includes(entry.id) || origin.version !== entry.version)
+        throw new PluginSourceError("Invalid preinstalled npm identity");
+      // An installed managed version belongs to the person/updater now. Even
+      // a missing seeded version must not cause a downgrade or replacement.
+      const hasManaged = () => this.services.index.versions(entry.id).some((item) => this.#managed(item));
+      if (hasManaged()) return mayUpdate ? this.#updateQuietly(root, entry, origin, before) : undefined;
+      const bundled = this.services.index.versions(entry.id);
+      if (bundled.length && !bundled.some((installed) => installed.version === entry.version))
+        throw new PluginSourceError("Bundled relocation must keep its installed version; review a version update separately");
+      const origins = Object.entries(await this.#loadOrigins()).filter(([key]) => key.startsWith(`${entry.id}@`));
+      if (origins.some(([, previous]) => !isSameSource(previous, origin)))
+        throw new PluginSourceError("Preinstallation cannot reuse data from another plugin source");
+      const previousOrigin = await this.origin(entry.id, entry.version);
+      let recorded = false;
+      try {
+        return await this.services.installManaged(root, { consent: false, before: async () => {
+          // Another installer may have finished while this waited for the package lock.
+          if (hasManaged()) throw new PluginSourceError("Plugin was installed while preinstallation was waiting");
+          await before();
+          await this.#recordOrigin(`${entry.id}@${entry.version}`, origin);
+          recorded = true;
+        } });
+      } catch (cause) {
+        // The same-version bundled entry still exists when copying/indexing
+        // fails. Do not leave it claiming npm ownership. A committed package
+        // whose later notification failed must keep its new origin, however.
+        if (recorded && !hasManaged()) await this.#recordOrigin(`${entry.id}@${entry.version}`, previousOrigin);
+        throw cause;
+      }
+    });
+    this.#adding = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Whether a version is in the managed store, rather than bundled or in development. */
+  #managed(item: PluginIndexEntry): boolean {
+    const relative = path.relative(this.services.packagesDirectory, item.root);
+    return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+  }
+
+  /**
+   * Whether a version, pinned by the app or newest on npm, may replace
+   * what's installed as the person's own update would, without asking: it's
+   * newer than every installed version, all of which came from this same npm
+   * package into the managed store, this app runs it, and it runs no code of
+   * its own and asks for nothing new (`updatesWithoutAsking`). Anything else
+   * waits for the person.
+   */
+  async #quietUpdate(entry: PluginIndexEntry, origin: Extract<PluginOrigin, { type: "npm" }>): Promise<boolean> {
+    if (pluginApiIssue(entry.manifest)) return false;
+    const installed = this.services.index.versions(entry.id);
+    if (!installed.length || installed.some((item) => !isNewerPluginVersion(entry.version, item.version) || !this.#managed(item))) return false;
+    // Read only for a real update, so a damaged file doesn't trouble every start's seed.
+    if (await this.#wentBackFrom(origin.package, entry.version)) return false;
+    const origins = await this.#loadOrigins();
+    if (installed.some((item) => {
+      const from = origins[`${item.id}@${item.version}`];
+      return from?.type !== "npm" || from.package !== origin.package || npmSource(from.registry) !== npmSource(origin.registry);
+    })) return false;
+    return updatesWithoutAsking(entry.manifest, this.services.grants.plugin(entry.id)?.allowed ?? [], this.services.index.get(entry.id)?.manifest);
+  }
+
+  async #updateQuietly(root: string, entry: PluginIndexEntry, origin: Extract<PluginOrigin, { type: "npm" }>, before: () => Promise<void>): Promise<PluginIndexEntry | undefined> {
+    if (!(await this.#quietUpdate(entry, origin))) return undefined;
+    const key = `${entry.id}@${entry.version}`;
+    const previousOrigin = await this.origin(entry.id, entry.version);
+    let recorded = false;
+    try {
+      return await this.services.installUpdate(root, async () => {
+        // The person may have changed the plugin while this waited for the package lock.
+        if (!(await this.#quietUpdate(entry, origin))) throw new PluginSourceError("The plugin changed while its update was waiting");
+        await before();
+        await this.#recordOrigin(key, origin);
+        recorded = true;
+      });
+    } catch (cause) {
+      if (recorded && !this.services.index.get(entry.id, entry.version)) await this.#recordOrigin(key, previousOrigin);
+      throw cause;
+    }
   }
 
   /** Where a package the person added came from; a local one has no origin. */
@@ -210,7 +414,16 @@ export class PluginSources {
       // The origin goes first: if it can't be saved nothing is installed, and
       // one left by an install that fails belongs to no installed version.
       await this.#recordOrigin(`${entry.id}@${entry.version}`, fetched.origin);
-      return this.services.installAdded(fetched.root, before, fetched.origin);
+      const added = await this.services.installAdded(fetched.root, before, fetched.origin);
+      // The person chose this version, so what they removed at or below it no longer holds updates back.
+      // Installed is installed, though, if that can't be saved.
+      const origin = fetched.origin;
+      if (origin?.type === "npm") await this.#changeDeclined((declined) => {
+        const kept = (declined[origin.package] ?? []).filter((version) => isNewerPluginVersion(version, entry.version));
+        if (kept.length) declined[origin.package] = kept;
+        else delete declined[origin.package];
+      }).catch(() => undefined);
+      return added;
     });
     this.#adding = run.catch(() => undefined);
     return run;
@@ -441,10 +654,17 @@ export class PluginSources {
   }
 
   #loadOrigins(): Promise<Record<string, PluginOrigin>> {
-    // It only says where a package came from, so losing it costs just that.
     return this.#origins ??= readFile(this.originsPath, "utf8")
-      .then((text) => JSON.parse(text) as Record<string, PluginOrigin>)
-      .catch(() => ({}));
+      .then((text) => {
+        const value: unknown = JSON.parse(text);
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid plugin origins; file left unchanged");
+        return value as Record<string, PluginOrigin>;
+      })
+      .catch((cause: NodeJS.ErrnoException) => {
+        this.#origins = undefined;
+        if (cause.code === "ENOENT") return {};
+        throw cause;
+      });
   }
 
   /** Adding the same version from elsewhere replaces it, origin included. */

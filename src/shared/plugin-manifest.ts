@@ -1,13 +1,18 @@
+import { parsePluginJson } from "./plugin-json.js";
+import { isBrowserUrl } from "./browser.js";
 import { Type, type Static } from "typebox";
-import { Errors } from "typebox/value";
-import { CUSTOM_MODEL_APIS } from "./contracts.js";
+import { Check, Errors } from "typebox/value";
+import { AUDIO_KINDS, AUDIO_OUTPUT_FORMATS, AUDIO_SAMPLE_RATES, AUDIO_PROMPT_MAX_LENGTH } from "./audio.js";
+import { MODEL_3D_MIN_POLYCOUNT, CUSTOM_MODEL_APIS, IMAGE_ASPECT_RATIOS, IMAGE_RESOLUTIONS, VIDEO_ASPECT_RATIOS, VIDEO_REFERENCE_MODES, VIDEO_RESOLUTIONS } from "./contracts.js";
 import { MAX_CAPTURE_FRAME, PLUGIN_GAME_USE_INPUT, PLUGIN_GAME_USE_OPERATIONS, type PluginGameUseInput, type PluginGameUseOperation, type PluginGameUseSpec } from "./playtest.js";
 import { isNewerPluginVersion, isPluginVersion } from "./plugins.js";
+import { hasSettingsStatusCommand } from "./plugin-settings.js";
 import { PREVIEW_FILTER_COLOR_SPACES, PREVIEW_FILTER_MAX_COEFFICIENT } from "./preview-filter.js";
 import { GAMEPAD_BUTTONS, GAMEPAD_STICKS, KEY_CODE_PATTERN, STICK_DIRECTIONS } from "./preview-input.js";
 import { PLUGIN_UI_MAJORS, PLUGIN_UI_PREVIEW_MAJORS } from "./plugin-ui-versions.js";
 import { compileWhen } from "./plugin-when.js";
-import { PLUGIN_HOOKS } from "./plugin-hooks.js";
+import { PLUGIN_HOOKS, PLUGIN_INSTRUCTIONS_MAX_CHARS } from "./plugin-hooks.js";
+import { panelStateIssue } from "./plugin-panel-state.js";
 
 // The plugin manifest at `.ohmygame-plugin/plugin.json`, read at
 // install time without running any plugin code. The TypeBox schemas below
@@ -18,7 +23,7 @@ import { PLUGIN_HOOKS } from "./plugin-hooks.js";
 export const PLUGIN_MANIFEST_SCHEMA_URL =
   "https://www.ohmygame.ai/schema/plugin-2.json";
 /** The plugin API this host implements; manifests name the range they need. */
-export const PLUGIN_HOST_API_VERSION = "2.4.0";
+export const PLUGIN_HOST_API_VERSION = "2.36.0";
 
 /** `./path` inside the package, without `..` segments or backslashes. */
 const RelativePath = (pattern = "") =>
@@ -27,10 +32,15 @@ const RelativePath = (pattern = "") =>
     minLength: 3,
     maxLength: 500,
   });
+const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const Slug = Type.String({
-  pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+  pattern: SLUG.source,
   maxLength: 64,
 });
+/** Whether a value is an id a manifest gives its panels, commands and the like. */
+export function isSlug(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 64 && SLUG.test(value);
+}
 const CamelId = Type.String({
   pattern: "^[a-z][a-zA-Z0-9]*$",
   maxLength: 64,
@@ -61,25 +71,34 @@ const PROJECT_PATH_SEGMENT =
  * app from adding the plugin.
  */
 export const PLUGIN_CATEGORIES = [
+  // Starting a game, the agent and its models, making assets, shaping the game,
+  // building and testing it, shipping it, and the rest.
   "engine",
   "templates",
-  "publishing",
-  "online",
-  "design",
-  "story",
+  "agent",
+  "provider",
   "art",
   "3d",
   "audio",
   "video",
-  "testing",
-  "learning",
-  "agent",
-  "provider",
+  "design",
+  "story",
   "workflow",
+  "testing",
+  "publishing",
+  "online",
   "integration",
   "theme",
+  "learning",
 ] as const;
 export type PluginCategory = (typeof PLUGIN_CATEGORIES)[number];
+
+/** The largest media adapter script a provider may have. */
+export const PLUGIN_MEDIA_ADAPTER_MAX_BYTES = 512 * 1024;
+
+/** How many keywords a plugin may name, and how long each may be. */
+export const PLUGIN_KEYWORDS_MAX = 8;
+export const PLUGIN_KEYWORD_MAX_LENGTH = 30;
 
 /** How many screenshots a plugin may show, and how large each file may be. */
 export const PLUGIN_SCREENSHOTS_MAX = 6;
@@ -97,6 +116,7 @@ export const PLUGIN_SLOTS = [
   "canvas.add",
   "canvas.node",
   "game.more",
+  "game.start",
 ] as const;
 
 /** Colour tokens a theme may set; everything else derives from them. */
@@ -127,7 +147,7 @@ const Literals = <const T extends string>(values: readonly T[]) =>
 
 const ConfigurationField = Type.Object(
   {
-    type: Literals(["text", "secret", "path", "boolean", "select"]),
+    type: Type.Union([Type.Literal("text"), Type.Literal("secret"), Type.Literal("path"), Type.Literal("boolean"), Type.Literal("select"), Type.Literal("json")]),
     title: Text(),
     description: Type.Optional(Text(500)),
     required: Type.Optional(Type.Boolean()),
@@ -159,6 +179,15 @@ const Capabilities = Type.Object(
      * contain a plugin that ignores it.
      */
     game: Type.Optional(Type.Boolean()),
+    /** App-wide native session access and persistent activation (API 2.5.0). */
+    sessions: Type.Optional(Type.Boolean()),
+    /**
+     * Pages and native code ask the language models the person set up, which
+     * counts toward their use of each provider (API 2.35.0).
+     */
+    models: Type.Optional(Type.Boolean()),
+    /** Pages add files they make to the person's Library, under the plugin's name (API 2.35.0). */
+    library: Type.Optional(Type.Boolean()),
     network: Type.Optional(
       Type.Array(
         Type.String({ pattern: "^[a-z0-9.-]+(?::\\d+)?$", maxLength: 253 }),
@@ -175,6 +204,21 @@ const Capabilities = Type.Object(
         { minItems: 1, maxItems: 30, uniqueItems: true },
       ),
     ),
+  },
+  { additionalProperties: false },
+);
+
+/**
+ * Files a new project starts from (API 2.36.0): the folder is copied once into
+ * an empty project of an app type, which is then the person's own.
+ */
+const ProjectTemplate = Type.Object(
+  {
+    id: Slug,
+    title: Text(),
+    description: Type.Optional(Text(500)),
+    projectType: Literals(["general", "web-game", "interactive-story"] as const),
+    folder: RelativePath("/?"),
   },
   { additionalProperties: false },
 );
@@ -260,6 +304,11 @@ const Tool = Type.Object(
     input: RelativePath("\\.json"),
     output: Type.Optional(RelativePath("\\.json")),
     timeoutSeconds: Type.Optional(TimeoutSeconds),
+    /**
+     * The panel whose page answers this tool, instead of the native entry
+     * (API 2.35.0). The app shows the panel while the page answers.
+     */
+    panel: Type.Optional(Slug),
   },
   { additionalProperties: false },
 );
@@ -279,7 +328,11 @@ const CommandRun = Type.Union([
     { tool: SnakeId, input: Type.Optional(Type.Unknown()) },
     { additionalProperties: false },
   ),
-  Type.Object({ openPanel: Slug }, { additionalProperties: false }),
+  Type.Object(
+    // `state` is what its page hears it was opened with (API 2.35.0).
+    { openPanel: Slug, state: Type.Optional(Type.Unknown()) },
+    { additionalProperties: false },
+  ),
   Type.Object(
     { openSettings: Type.Literal(true) },
     { additionalProperties: false },
@@ -392,6 +445,51 @@ const CanvasNode = Type.Object(
   { additionalProperties: false },
 );
 
+export const ASSET_SOURCE_MEDIA = ["image", "video", "audio", "model"] as const;
+
+/**
+ * A place the Library browses for media, such as a free asset site, shown as
+ * a tab beside Local. Its `search` and `fetch` are native command handlers
+ * (API 2.5.0).
+ */
+const AssetSource = Type.Object(
+  {
+    id: Slug,
+    title: Text(60),
+    description: Type.Optional(Text(500)),
+    media: Type.Array(Literals(ASSET_SOURCE_MEDIA), { minItems: 1, uniqueItems: true }),
+    search: CamelId,
+    fetch: CamelId,
+    timeoutSeconds: Type.Optional(TimeoutSeconds),
+    /**
+     * How long the Library shows a browse of it again (no search words, by
+     * kind) without asking the plugin; 0 never. Ten minutes when left out
+     * (API 2.35.0).
+     */
+    cacheSeconds: Type.Optional(Type.Integer({ minimum: 0, maximum: 86_400 })),
+    /**
+     * Its own ways to browse it, shown in this order as one row of choices in
+     * place of the media kinds; the first is chosen at first, and `search`
+     * gets the one chosen as `collection` (API 2.35.0).
+     */
+    collections: Type.Optional(Type.Array(
+      Type.Object({ id: Slug, title: Text(40) }, { additionalProperties: false }),
+      { minItems: 2, maxItems: 12 },
+    )),
+  },
+  { additionalProperties: false },
+);
+
+/** A site on the Browser panel's new-tab page, under the plugin's name (API 2.5.0). */
+const BrowserShortcut = Type.Object(
+  {
+    id: Slug,
+    title: Text(60),
+    url: HttpsUrl,
+  },
+  { additionalProperties: false },
+);
+
 /** A group of canvas nodes, in a JSON file of the package, to add to a board. */
 const CanvasPreset = Type.Object(
   {
@@ -452,13 +550,355 @@ const Theme = Type.Object(
   { additionalProperties: false },
 );
 
+/**
+ * How the app adds a provider's key to a request its media adapter marks
+ * `auth: true`: in a header, with a scheme such as `Bearer`, or as a query
+ * parameter. The adapter never sees the key.
+ */
+const MediaAuth = Type.Union([
+  Type.Object(
+    {
+      header: Type.String({ pattern: "^[A-Za-z][A-Za-z0-9-]{0,63}$" }),
+      scheme: Type.Optional(Type.String({ pattern: "^[A-Za-z][A-Za-z0-9-]{0,31}$" })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { query: Type.String({ pattern: "^[A-Za-z][A-Za-z0-9_-]{0,63}$" }) },
+    { additionalProperties: false },
+  ),
+]);
+
+/**
+ * What every media model has: its id and title, and for one the adapter lists
+ * (`discoverModels`) a short description to find it by. `data` is the
+ * adapter's own, at most 4 KB as JSON, given back as `input.modelData`, such
+ * as which of the vendor's fields the model takes (API 2.5.0).
+ */
+const MEDIA_MODEL_COMMON = {
+  id: Type.String({ minLength: 1, maxLength: 200 }),
+  title: Type.Optional(Text()),
+  description: Type.Optional(Text(500)),
+  data: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+};
+/** The most a model's `data` may hold, as JSON. */
+export const PLUGIN_MEDIA_MODEL_DATA_MAX_CHARACTERS = 4096;
+
+/** API 2.27: returns source-sized PNG alpha for host-owned background removal. */
+const MediaImageBackgroundRemoval = Type.Object(MEDIA_MODEL_COMMON, { additionalProperties: false });
+export type PluginImageBackgroundRemoval = Static<typeof MediaImageBackgroundRemoval>;
+
+const MediaImageModel = Type.Object(
+  {
+    ...MEDIA_MODEL_COMMON,
+    resolutions: Type.Array(Literals(IMAGE_RESOLUTIONS), { uniqueItems: true }),
+    aspectRatios: Type.Array(Literals(IMAGE_ASPECT_RATIOS), { uniqueItems: true }),
+    /** API 2.31: false when the workflow owns this dimension; its choices must be empty. */
+    supportsResolution: Type.Optional(Type.Boolean()),
+    supportsAspectRatio: Type.Optional(Type.Boolean()),
+    /** How many pictures a request may pass along, 0 for none. */
+    maxReferenceImages: Type.Optional(Type.Integer({ minimum: 0, maximum: 16 })),
+    /** API 2.30: how many pictures a request needs, 0 by default. */
+    minReferenceImages: Type.Optional(Type.Integer({ minimum: 0, maximum: 16 })),
+    /** API 2.30: the longest side a reference picture reaches the adapter with; larger ones are scaled down. */
+    maxReferenceImageDimension: Type.Optional(Type.Integer({ minimum: 16, maximum: 4096 })),
+    /** API 2.33: the adapter can use a reference image as the subject without text. */
+    promptOptionalWithReference: Type.Optional(Type.Literal(true)),
+    /** API 2.34: multiple outputs are ordered animation frames composed by the host. */
+    animationFrames: Type.Optional(Type.Literal(true)),
+  },
+  { additionalProperties: false },
+);
+
+const MediaVideoModel = Type.Object(
+  {
+    ...MEDIA_MODEL_COMMON,
+    /** Lengths in seconds it can make. */
+    durations: Type.Array(Type.Integer({ minimum: 1, maximum: 30 }), { minItems: 1, maxItems: 30, uniqueItems: true }),
+    resolutions: Type.Array(Literals(VIDEO_RESOLUTIONS), { minItems: 1, uniqueItems: true }),
+    aspectRatios: Type.Array(Literals(VIDEO_ASPECT_RATIOS), { minItems: 1, uniqueItems: true }),
+    /** Up to 30 reference pictures (API 2.8), 0 for none; frame mode still takes at most two. */
+    maxReferenceImages: Type.Optional(Type.Integer({ minimum: 0, maximum: 30 })),
+    /**
+     * How it uses those pictures: `frame` as the first (and last) frame,
+     * `reference` as a look to follow. The first is the default.
+     */
+    referenceModes: Type.Optional(Type.Array(Literals(VIDEO_REFERENCE_MODES), { minItems: 1, uniqueItems: true })),
+    /** Ratios with image references; defaults to aspectRatios. API 2.7. */
+    imageAspectRatios: Type.Optional(Type.Array(Literals(VIDEO_ASPECT_RATIOS), { minItems: 1, uniqueItems: true })),
+    /** Ratios with first/last frames; overrides imageAspectRatios. API 2.7. */
+    frameAspectRatios: Type.Optional(Type.Array(Literals(VIDEO_ASPECT_RATIOS), { minItems: 1, uniqueItems: true })),
+  },
+  { additionalProperties: false },
+);
+
+const MediaAudioRates = Type.Optional(Type.Array(Type.Union(AUDIO_SAMPLE_RATES.map(rate => Type.Literal(rate))), { minItems: 1, uniqueItems: true }));
+const MediaAudioModel = Type.Object(
+  {
+    ...MEDIA_MODEL_COMMON,
+    /** What it makes: `speech`, `sound-effect`, `music`. */
+    kinds: Type.Array(Literals(AUDIO_KINDS), { uniqueItems: true }),
+    /** API 2.20: turns a host-owned audio file into text; kinds may then be empty. */
+    transcribes: Type.Optional(Type.Boolean()),
+    /** Speaks the prompt word for word in a voice, rather than following a description. */
+    readsText: Type.Optional(Type.Boolean()),
+    /** API 2.22: accepts a custom speaker, including for prompt-directed audio. */
+    speaker: Type.Optional(Type.Boolean()),
+    /** Shared controls; only declared options are passed to the adapter. */
+    pitch: Type.Optional(Type.Boolean()),
+    volume: Type.Optional(Type.Boolean()),
+    style: Type.Optional(Type.Boolean()),
+    ssml: Type.Optional(Type.Boolean()),
+    /** Shared TTS options: cloned voices, pronunciation, dialect, timing and bit rate. */
+    speechOptions: Type.Optional(Type.Boolean()),
+    /** The voices it speaks in, the first by default. */
+    voices: Type.Optional(
+      Type.Array(
+        Type.Object(
+          { id: Type.String({ minLength: 1, maxLength: 200 }), name: Text() },
+          { additionalProperties: false },
+        ),
+        { minItems: 1, maxItems: 500 },
+      ),
+    ),
+    /** The files it can make; `mp3` when left out. */
+    formats: Type.Optional(Type.Array(Literals(AUDIO_OUTPUT_FORMATS), { minItems: 1, uniqueItems: true })),
+    /** API 2.25: explicit channel counts accepted by this model; unset means provider-chosen only. */
+    channels: Type.Optional(Type.Array(Type.Union([Type.Literal(1), Type.Literal(2)]), { minItems: 1, uniqueItems: true })),
+    /** API 2.17: language choices and speech rate on the shared -50…100 scale. */
+    languages: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 40 }), { minItems: 1, maxItems: 200, uniqueItems: true })),
+    speedRange: Type.Optional(Type.Tuple([Type.Integer({ minimum: -50, maximum: 100 }), Type.Integer({ minimum: -50, maximum: 100 })])),
+    /** API 2.17: supported rates for each declared output format. */
+    sampleRatesByFormat: Type.Optional(Type.Object({ mp3: MediaAudioRates, wav: MediaAudioRates, ogg_opus: MediaAudioRates }, { additionalProperties: false, minProperties: 1 })),
+    maxTextCharacters: Type.Optional(Type.Integer({ minimum: 1, maximum: AUDIO_PROMPT_MAX_LENGTH })),
+    minDurationSeconds: Type.Optional(Type.Number({ minimum: 0.1, maximum: 600 })),
+    maxDurationSeconds: Type.Optional(Type.Number({ minimum: 0.1, maximum: 600 })),
+    /** Makes music without vocals when asked. */
+    instrumental: Type.Optional(Type.Boolean()),
+    /** Makes audio that loops seamlessly when asked. */
+    loop: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+/** What a plugin's 3D model can make from (API 2.5.0). */
+export const PLUGIN_3D_OPERATIONS = ["text", "image"] as const;
+
+const Media3DModel = Type.Object(
+  {
+    ...MEDIA_MODEL_COMMON,
+    /** `text`: from a prompt; `image`: from pictures of the object. */
+    operations: Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]), { minItems: 1, uniqueItems: true }),
+    /** Existing operation controls and validation; the plugin still owns all vendor HTTP. */
+    optionProfile: Type.Optional(Type.Union([Type.Literal("meshy"), Type.Literal("tripo"), Type.Literal("hyper3d")])),
+    /** Labels beyond maxReferenceImages stay available if a custom version raises its limit again. */
+    referenceImageLabels: Type.Optional(Type.Array(Text(), { minItems: 1, maxItems: 8 })),
+    estimatedCredits: Type.Optional(Type.Number({ minimum: 0 })),
+    defaults: Type.Optional(Type.Object({ texture: Type.Boolean(), pbr: Type.Boolean() }, { additionalProperties: false })),
+    /** Adapter-owned generation mode, exposed by the optional model editor (API 2.16). */
+    modelSettings: Type.Optional(Type.Object({
+      imageOperation: Type.Union([Type.Literal("image-to-3d"), Type.Literal("multi-image-to-3d")]),
+      modelType: Type.Union([Type.Literal("standard"), Type.Literal("smart-topology")]),
+    }, { additionalProperties: false })),
+    /** Views of one object an `image` request may pass, the first the front; 1 when left out. */
+    maxReferenceImages: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+    /** The triangle counts it takes; a model with one size sets min, max and default alike. */
+    polycount: Type.Object(
+      {
+        min: Type.Integer({ minimum: MODEL_3D_MIN_POLYCOUNT, maximum: 2_000_000 }),
+        max: Type.Integer({ minimum: MODEL_3D_MIN_POLYCOUNT, maximum: 2_000_000 }),
+        default: Type.Integer({ minimum: MODEL_3D_MIN_POLYCOUNT, maximum: 2_000_000 }),
+        /** The counts the canvas offers; the default alone when left out. */
+        presets: Type.Optional(Type.Array(Type.Integer({ minimum: MODEL_3D_MIN_POLYCOUNT, maximum: 2_000_000 }), { maxItems: 10, uniqueItems: true })),
+      },
+      { additionalProperties: false },
+    ),
+    /** Paints the model when asked. */
+    texture: Type.Optional(Type.Boolean()),
+    /** Makes PBR materials when asked. */
+    pbr: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+/** Processing stays available independently of generation-model visibility. API 2.11. */
+const Media3DProcessing = Type.Object(
+  { ...Type.Omit(Media3DModel, ["modelSettings"]).properties, operations: Type.Array(Type.Union([Type.Literal("retexture"), Type.Literal("remesh"), Type.Literal("animate")]), { minItems: 1, uniqueItems: true }),
+    animationSourceAxis: Type.Optional(Type.Literal("+Z")) },
+  { additionalProperties: false },
+);
+export type PluginMediaProcessingModel = Static<typeof Media3DProcessing>;
+
+/**
+ * The adapter's `models` step lists more of the vendor's models, which the
+ * person turns on in Settings; the ones here are on by default (API 2.5.0).
+ */
+const DiscoverModels = Type.Optional(Type.Boolean());
+
+/** How long one request may take, the download included, in minutes. */
+const MaxMinutes = Type.Integer({ minimum: 1, maximum: 120 });
+/** Declared non-secret settings pinned to one durable generation. */
+const MediaConfiguration = Type.Optional(Type.Array(CamelId, { minItems: 1, maxItems: 16, uniqueItems: true }));
+
+/**
+ * What a provider makes besides chat (API 2.5.0). `adapter` is a script in
+ * the package that turns OhMyGame's requests into the vendor's API, run in a
+ * sandbox whose only way out is `host.fetch` to `capabilities.network`.
+ */
+const ProviderMedia = Type.Object(
+  {
+    adapter: RelativePath("\\.js"),
+    auth: Type.Optional(MediaAuth),
+    image: Type.Optional(
+      Type.Object(
+        { discoverModels: DiscoverModels, configuration: MediaConfiguration, recoverable: Type.Optional(Type.Literal(true)), maxMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })), backgroundRemoval: Type.Optional(MediaImageBackgroundRemoval), models: Type.Array(MediaImageModel, { minItems: 1, maxItems: 100 }) },
+        { additionalProperties: false },
+      ),
+    ),
+    video: Type.Optional(
+      Type.Object(
+        {
+          /**
+           * How long one video may take, the download included, in minutes:
+           * 15 when left out. A self-hosted model or a long queue needs more.
+           */
+          maxMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })),
+          discoverModels: DiscoverModels,
+          models: Type.Array(MediaVideoModel, { minItems: 1, maxItems: 100 }),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    /** Speech, sound effects and music; 10 minutes a request when `maxMinutes` is left out. */
+    audio: Type.Optional(
+      Type.Object(
+        { maxMinutes: Type.Optional(MaxMinutes), configuration: MediaConfiguration, discoverModels: DiscoverModels, listVoices: Type.Optional(Type.Boolean()), defaultVoiceSetting: Type.Optional(CamelId), models: Type.Array(MediaAudioModel, { minItems: 1, maxItems: 100 }) },
+        { additionalProperties: false },
+      ),
+    ),
+    /** 3D models as GLB; 15 minutes a request when `maxMinutes` is left out. */
+    "3d": Type.Optional(
+      Type.Object(
+        { editableModels: Type.Optional(Type.Boolean()), balance: Type.Optional(Type.Boolean()), inputFiles: Type.Optional(Type.Boolean()), processing: Type.Optional(Media3DProcessing), maxMinutes: Type.Optional(MaxMinutes), discoverModels: DiscoverModels, models: Type.Array(Media3DModel, { minItems: 1, maxItems: 100 }) },
+        { additionalProperties: false },
+      ),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+/** What a provider's media section can make, by the names of its sections. */
+export const PLUGIN_MEDIA_KINDS = ["image", "video", "audio", "3d"] as const;
+export type PluginMediaKind = (typeof PLUGIN_MEDIA_KINDS)[number];
+const MEDIA_MODEL_SCHEMAS = { image: MediaImageModel, video: MediaVideoModel, audio: MediaAudioModel, "3d": Media3DModel };
+/** One model of a kind, as a manifest lists it and an adapter's `models` step returns it. */
+export interface PluginMediaModels {
+  image: Static<typeof MediaImageModel>;
+  video: Static<typeof MediaVideoModel>;
+  audio: Static<typeof MediaAudioModel>;
+  "3d": Static<typeof Media3DModel>;
+}
+export type PluginMediaModel = PluginMediaModels[PluginMediaKind];
+
+/** A kind's models as Settings shows them: the manifest's, those turned on, and those the adapter listed. */
+export interface PluginMediaModelList {
+  kind: PluginMediaKind;
+  /** Whether the adapter can list more of the vendor's models. */
+  discoverable: boolean;
+  /** When they were last listed in this session. */
+  listedAt?: string;
+  /** Listed models left out because they didn't pass the checks. */
+  skipped?: number;
+  /** Present only when this 3D provider opts into editing. */
+  editor?: { revision: string; templates: Array<PluginMediaModels["3d"]> };
+  models: Array<{ id: string; name: string; description?: string; default: boolean; shown: boolean;
+    definition?: PluginMediaModels["3d"]; custom?: boolean; edited?: boolean }>;
+}
+
+/** Only person-owned fields may be changed; opaque adapter data remains with the chosen template. */
+export type PluginEditable3DModel = Pick<PluginMediaModels["3d"], "id" | "title" | "operations" | "polycount" | "maxReferenceImages" | "texture" | "pbr" | "defaults" | "modelSettings">;
+export interface PluginSave3DModel {
+  revision: string;
+  /** Required for a new custom version; absent when editing an existing definition. */
+  templateId?: string;
+  model: PluginEditable3DModel;
+}
+
+/** What's wrong with a model of a kind beyond its schema, as [field, message]. */
+export function mediaModelIssues(kind: PluginMediaKind, model: PluginMediaModel | PluginMediaProcessingModel | PluginImageBackgroundRemoval): Array<[string, string]> {
+  const issues: Array<[string, string]> = [];
+  if (model.data !== undefined && JSON.stringify(model.data).length > PLUGIN_MEDIA_MODEL_DATA_MAX_CHARACTERS)
+    issues.push(["data", `must be at most ${PLUGIN_MEDIA_MODEL_DATA_MAX_CHARACTERS / 1024} KB as JSON`]);
+  if (kind === "image") {
+    const image = model as PluginMediaModels["image"];
+    // Processing models have no generation dimensions.
+    if ("resolutions" in image) {
+      for (const [choices, supported] of [["resolutions", "supportsResolution"], ["aspectRatios", "supportsAspectRatio"]] as const) {
+        if (image[supported] === false ? image[choices].length !== 0 : image[choices].length === 0)
+          issues.push([choices, image[supported] === false ? "must be empty when the workflow owns this dimension" : "needs at least one choice"]);
+      }
+    }
+    if ((image.minReferenceImages ?? 0) > (image.maxReferenceImages ?? 0))
+      issues.push(["minReferenceImages", "must not be more than maxReferenceImages"]);
+    if (image.maxReferenceImageDimension !== undefined && !image.maxReferenceImages)
+      issues.push(["maxReferenceImageDimension", "requires maxReferenceImages greater than zero"]);
+    if (image.promptOptionalWithReference && !image.maxReferenceImages)
+      issues.push(["promptOptionalWithReference", "requires maxReferenceImages greater than zero"]);
+  }
+  if (kind === "video") {
+    const video = model as PluginMediaModels["video"];
+    for (const field of ["imageAspectRatios", "frameAspectRatios"] as const)
+      if (video[field] && !video.maxReferenceImages) issues.push([field, "requires maxReferenceImages greater than zero"]);
+    if (video.frameAspectRatios && video.referenceModes && !video.referenceModes.some((mode) => mode === "frame"))
+      issues.push(["frameAspectRatios", "requires the frame reference mode"]);
+  }
+  if (kind === "audio") {
+    const audio = model as PluginMediaModels["audio"];
+    if (!audio.kinds.length && !audio.transcribes) issues.push(["kinds", "needs an audio kind or transcribes: true"]);
+    if (audio.voices && !audio.readsText) issues.push(["voices", "voices are for a model that reads text"]);
+    if (audio.ssml && !audio.readsText) issues.push(["ssml", "requires a model that reads text"]);
+    if (audio.speechOptions && !audio.readsText) issues.push(["speechOptions", "requires a model that reads text"]);
+    if (audio.minDurationSeconds && audio.maxDurationSeconds && audio.minDurationSeconds > audio.maxDurationSeconds)
+      issues.push(["minDurationSeconds", "must not be more than maxDurationSeconds"]);
+    if (audio.speedRange && (!audio.kinds.length || audio.speedRange[0] > audio.speedRange[1]))
+      issues.push(["speedRange", "requires a generation model and min ≤ max"]);
+    if (audio.sampleRatesByFormat && Object.keys(audio.sampleRatesByFormat).some(format => !(audio.formats ?? ["mp3"]).includes(format as typeof AUDIO_OUTPUT_FORMATS[number])))
+      issues.push(["sampleRatesByFormat", "rates must name a declared output format"]);
+  }
+  if (kind === "3d") {
+    const value = model as PluginMediaModels["3d"] | PluginMediaProcessingModel;
+    const range = value.polycount;
+    const settings = (value as PluginMediaModels["3d"]).modelSettings;
+    if (settings?.imageOperation === "image-to-3d" && (value.maxReferenceImages ?? 1) !== 1)
+      issues.push(["modelSettings", "single-image models take exactly one reference image"]);
+    if (settings?.modelType === "smart-topology" && settings.imageOperation !== "image-to-3d")
+      issues.push(["modelSettings", "smart topology requires a single-image model"]);
+    if (value.defaults?.texture && !value.texture || value.defaults?.pbr && (!value.pbr || !value.defaults.texture)) issues.push(["defaults", "defaults must be supported by texture and pbr capabilities"]);
+    if (!(range.min <= range.default && range.default <= range.max) || range.presets?.some((count) => count < range.min || count > range.max))
+      issues.push(["polycount", "needs min ≤ default and presets ≤ max"]);
+  }
+  return issues;
+}
+
+/**
+ * Checks a model an adapter's `models` step returned, as a manifest's models
+ * are checked: what's wrong with it, or undefined when it can be listed.
+ */
+export function pluginMediaModelProblem(kind: PluginMediaKind, value: unknown): string | undefined {
+  const [error] = Errors(MEDIA_MODEL_SCHEMAS[kind], value);
+  if (error) return `${error.instancePath || "/"} ${error.message}`;
+  const [issue] = mediaModelIssues(kind, value as PluginMediaModel);
+  return issue ? `/${issue[0]} ${issue[1]}` : undefined;
+}
+
 const Provider = Type.Object(
   {
     id: Slug,
     title: Text(),
     icon: Type.Optional(Icon),
-    api: Literals(CUSTOM_MODEL_APIS),
-    baseUrl: HttpsUrl,
+    /** Chat, with `baseUrl`; a provider that only makes media leaves both out. */
+    api: Type.Optional(Literals(CUSTOM_MODEL_APIS)),
+    baseUrl: Type.Optional(HttpsUrl),
     /** A `secret` configuration field holding the key. */
     apiKey: Type.Optional(CamelId),
     models: Type.Optional(
@@ -474,6 +914,7 @@ const Provider = Type.Object(
       ),
     ),
     discoverModels: Type.Optional(Type.Boolean()),
+    media: Type.Optional(ProviderMedia),
   },
   { additionalProperties: false },
 );
@@ -488,6 +929,8 @@ const Agent = Type.Object(
   {
     id: Slug,
     title: Text(),
+    /** Its logo, shown in Settings → Agents and the model menu (API 2.5.0). */
+    icon: Type.Optional(Icon),
     command: Type.String({ pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]*$", maxLength: 100 }),
     /** What starts the protocol, such as `["--acp"]`. */
     args: Type.Optional(
@@ -499,6 +942,16 @@ const Agent = Type.Object(
   },
   { additionalProperties: false },
 );
+
+/**
+ * What the person sees beside the server in the plugin's Settings: how to get
+ * it running (`setup`, plain text, `%key%` for a translation) and a page about
+ * it (`docs`). Never part of how the server starts.
+ */
+const McpServerGuide = {
+  setup: Type.Optional(Text(1000)),
+  docs: Type.Optional(HttpsUrl),
+};
 
 /** A string that may name configuration values as `${config.field}`. */
 const Template = (maxLength = 2000) => Type.String({ maxLength });
@@ -527,6 +980,7 @@ const McpProcessServer = Type.Object(
       uniqueItems: true,
     }),
     timeoutSeconds: Type.Optional(TimeoutSeconds),
+    ...McpServerGuide,
   },
   { additionalProperties: false },
 );
@@ -547,6 +1001,7 @@ const McpHttpServer = Type.Object(
       uniqueItems: true,
     }),
     timeoutSeconds: Type.Optional(TimeoutSeconds),
+    ...McpServerGuide,
   },
   { additionalProperties: false },
 );
@@ -673,6 +1128,30 @@ export const PluginManifestV2Schema = Type.Object(
     /** Still being checked on real projects; the app marks it Beta. */
     beta: Type.Optional(Type.Boolean()),
     icon: Type.Optional(Icon),
+    /**
+     * Where it's on before the person decides: `"project"`, only in projects
+     * that turn it on; `{ files }`, also by itself in a project whose folder
+     * has any of these files (a path from the project root, or `*.ext` for a
+     * file at the root). Without it, a plugin that only adds Skills is on in
+     * every project it suits, and one added from a source is too.
+     */
+    activation: Type.Optional(
+      Type.Union([
+        Type.Literal("project"),
+        Type.Object(
+          {
+            files: Type.Array(
+              Type.String({
+                pattern: `^(?:${PROJECT_PATH_SEGMENT}(?:/${PROJECT_PATH_SEGMENT})*|\\*\\.[A-Za-z0-9]{1,20})$`,
+                maxLength: 200,
+              }),
+              { minItems: 1, maxItems: 10, uniqueItems: true },
+            ),
+          },
+          { additionalProperties: false },
+        ),
+      ]),
+    ),
     /** Project types the plugin suits: built-in ids, or `publisher/name:type`. */
     appliesTo: Type.Optional(
       Type.Array(
@@ -700,6 +1179,10 @@ export const PluginManifestV2Schema = Type.Object(
         maxItems: 3,
         uniqueItems: true,
       }),
+    ),
+    /** Words people may search for it by, shown on its page (API 2.5.0). */
+    keywords: Type.Optional(
+      Type.Array(Text(PLUGIN_KEYWORD_MAX_LENGTH), { minItems: 1, maxItems: PLUGIN_KEYWORDS_MAX, uniqueItems: true }),
     ),
     links: Type.Optional(
       Type.Object(
@@ -735,6 +1218,14 @@ export const PluginManifestV2Schema = Type.Object(
         {
           major: Type.Optional(Type.Integer({ minimum: 1, maximum: 999 })),
           preview: Type.Optional(Type.Boolean()),
+          /**
+           * Folders of the project, such as `./pixelfx/`, whose `.js` and
+           * `.mjs` files the plugin's pages may import, with `project.files`
+           * (API 2.35.0).
+           */
+          projectModules: Type.Optional(
+            Type.Array(RelativePath("/?"), { minItems: 1, maxItems: 10, uniqueItems: true }),
+          ),
           accent: Type.Optional(
             Type.Union([
               HexColor,
@@ -759,7 +1250,9 @@ export const PluginManifestV2Schema = Type.Object(
       Type.Object(
         {
           projectTypes: list(ProjectType),
+          templates: Type.Optional(Type.Array(ProjectTemplate, { minItems: 1, maxItems: 10 })),
           skills: Type.Optional(RelativePath("/?")),
+          instructions: Type.Optional(Type.String({ minLength: 1, maxLength: PLUGIN_INSTRUCTIONS_MAX_CHARS, pattern: "\\S" })),
           tools: list(Tool),
           commands: list(Command),
           settings: Type.Optional(Settings),
@@ -777,6 +1270,8 @@ export const PluginManifestV2Schema = Type.Object(
           ),
           canvasNodes: list(CanvasNode),
           canvasPresets: list(CanvasPreset),
+          assetSources: list(AssetSource),
+          browserShortcuts: list(BrowserShortcut),
         },
         { additionalProperties: false },
       ),
@@ -789,7 +1284,8 @@ export type PluginManifestV2 = Static<typeof PluginManifestV2Schema>;
 export type PluginContributions = NonNullable<PluginManifestV2["contributes"]>;
 
 /**
- * Whether a plugin only adds Skills and asks for nothing. Such a plugin can't
+ * Whether a plugin only adds Skills, and perhaps project templates, and asks
+ * for nothing. Such a plugin can't
  * run code or reach files of its own, so it can apply to every project it
  * suits without a project turning it on.
  */
@@ -802,8 +1298,9 @@ export function isAppWidePlugin(manifest: PluginManifestV2): boolean {
       (value) => value === undefined || value === false || (Array.isArray(value) && !value.length),
     ) &&
     contributes.skills !== undefined &&
+    // Templates are files copied into a new project, so they run nothing either.
     Object.entries(contributes).every(
-      ([key, value]) => key === "skills" || value === undefined,
+      ([key, value]) => key === "skills" || key === "templates" || value === undefined,
     )
   );
 }
@@ -916,6 +1413,14 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
 
   if (!isPluginVersion(manifest.version))
     issue("/version", "must be a semantic version");
+  if (manifest.ui?.projectModules && !capabilities["project.files"])
+    issue("/ui/projectModules", "pages import the project's modules with the project.files capability");
+  if (manifest.ui?.projectModules && !contributes.panels?.length)
+    issue("/ui/projectModules", "only pages import modules, and the plugin has no panels");
+  // The page server serves no hidden path, so a module there could never load.
+  for (const [index, folder] of (manifest.ui?.projectModules ?? []).entries())
+    if (folder.split("/").some((part) => part.startsWith(".") && part !== "."))
+      issue(`/ui/projectModules/${index}`, "pages can't import modules from a hidden folder");
   if (native !== Boolean(capabilities.native))
     issue(
       "/capabilities/native",
@@ -923,11 +1428,17 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
         ? "a native entrypoint needs the native capability"
         : "the native capability needs a native entrypoint",
     );
+  if (capabilities.sessions && !native)
+    issue("/capabilities/sessions", "only native code accesses app sessions");
   if (capabilities.game && !native)
     issue("/capabilities/game", "only native code plays the game");
 
   for (const [id, field] of Object.entries(manifest.configuration ?? {})) {
     const path = `/configuration/${id}`;
+    if (field.type === "json" && typeof field.default === "string") {
+      try { parsePluginJson(field.default); }
+      catch (cause) { issue(`${path}/default`, (cause as Error).message); }
+    }
     if (field.type === "secret" && field.default !== undefined)
       issue(`${path}/default`, "a secret can't have a default");
     if (field.type === "select") {
@@ -951,6 +1462,7 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
 
   for (const key of [
     "projectTypes",
+    "templates",
     "commands",
     "themes",
     "providers",
@@ -962,6 +1474,8 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
     "inputMaps",
     "canvasNodes",
     "canvasPresets",
+    "assetSources",
+    "browserShortcuts",
   ] as const) {
     const seen = new Set<string>();
     contributes[key]?.forEach((item, index) => {
@@ -970,14 +1484,18 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
       seen.add(item.id);
     });
   }
+  contributes.browserShortcuts?.forEach((shortcut, index) => {
+    if (!isBrowserUrl(shortcut.url)) issue(`/contributes/browserShortcuts/${index}/url`, "must be a web address without credentials");
+  });
   const toolNames = new Set<string>();
   contributes.tools?.forEach((tool, index) => {
     if (toolNames.has(tool.name))
       issue(`/contributes/tools/${index}/name`, `duplicate tool ${tool.name}`);
     toolNames.add(tool.name);
   });
-  if (contributes.tools && !native)
-    issue("/contributes/tools", "tools run in the native entrypoint");
+  // A tool runs in the native entry unless a panel's page answers it.
+  if (contributes.tools?.some((tool) => !tool.panel) && !native)
+    issue("/contributes/tools", "tools run in the native entrypoint unless they name the panel that answers them");
   if (contributes.hooks && !native)
     issue("/contributes/hooks", "hooks run in the native entrypoint");
   contributes.tools?.forEach((tool, index) => {
@@ -990,6 +1508,10 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
 
   const slashes = new Set<string>();
   const panels = new Set(contributes.panels?.map((panel) => panel.id));
+  contributes.tools?.forEach((tool, index) => {
+    if (tool.panel !== undefined && !panels.has(tool.panel))
+      issue(`/contributes/tools/${index}/panel`, `no panel ${tool.panel}`);
+  });
   const commands = new Set(contributes.commands?.map((command) => command.id));
   contributes.projectTypes?.forEach((type, index) => {
     // Literal unions read as never in the inferred types, so the declaration is read as written.
@@ -1026,6 +1548,10 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
       issue(`${path}/run/native`, "needs a native entrypoint");
     if ("openPanel" in run && !panels.has(run.openPanel))
       issue(`${path}/run/openPanel`, `no panel named ${run.openPanel}`);
+    if ("openPanel" in run && run.state !== undefined) {
+      const stateIssue = panelStateIssue(run.state);
+      if (stateIssue) issue(`${path}/run/state`, stateIssue);
+    }
     command.slots?.forEach((slot, slotIndex) => {
       const compiled = slot.when === undefined ? undefined : compileWhen(slot.when);
       if (compiled && !compiled.ok)
@@ -1049,6 +1575,14 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
     if (!keys.length) issue(`/contributes/inputMaps/${index}`, "presses no keys");
   });
 
+  contributes.assetSources?.forEach((source, index) => {
+    if (!native) issue(`/contributes/assetSources/${index}/search`, "needs a native entrypoint");
+    const collections = new Set<string>();
+    source.collections?.forEach((collection, at) => {
+      if (collections.has(collection.id)) issue(`/contributes/assetSources/${index}/collections/${at}/id`, `duplicate collection ${collection.id}`);
+      collections.add(collection.id);
+    });
+  });
   contributes.canvasNodes?.forEach((node, index) => {
     const path = `/contributes/canvasNodes/${index}`;
     if (!native) issue(`${path}/run/native`, "needs a native entrypoint");
@@ -1096,6 +1630,9 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
         issue(`${path}/field`, `no configuration field ${row.field}`);
       if ("action" in row && !commands.has(row.action.command))
         issue(`${path}/action/command`, `no command ${row.action.command}`);
+      // A warning, not an error: plugins published before the app checked this still load.
+      if ("widget" in row && row.widget === "status" && !hasSettingsStatusCommand(manifest))
+        ignored.push({ path, message: "shows only with native code and a native settings-status command with changesFiles: false, so it's ignored" });
     }),
   );
 
@@ -1130,8 +1667,58 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
       if (field?.type !== "secret")
         issue(`${path}/apiKey`, "must name a secret configuration field");
     }
-    if (!provider.models && !provider.discoverModels)
+    if (provider.media?.audio?.defaultVoiceSetting) {
+      const field = manifest.configuration?.[provider.media.audio.defaultVoiceSetting];
+      if (field?.type !== "text" && field?.type !== "select")
+        issue(`${path}/media/audio/defaultVoiceSetting`, "must name a text or select configuration field");
+      if (provider.media.audio.listVoices)
+        issue(`${path}/media/audio/defaultVoiceSetting`, "account voices require an explicit voice selection");
+    }
+    const chat = provider.api !== undefined || provider.baseUrl !== undefined;
+    if (chat && (!provider.api || !provider.baseUrl))
+      issue(path, "chat needs both api and baseUrl");
+    if (chat && !provider.models && !provider.discoverModels)
       issue(path, "list models or discover them");
+    if (!chat && (provider.models || provider.discoverModels))
+      issue(path, "models and discoverModels are for chat, which needs api and baseUrl");
+    if (!chat && !provider.media)
+      issue(path, "a provider needs chat (api and baseUrl) or media");
+    if (provider.media) {
+      const media = provider.media;
+      if (!media.image && !media.video && !media.audio && !media["3d"])
+        issue(`${path}/media`, "list what it makes: image, video, audio or 3d");
+      for (const kind of PLUGIN_MEDIA_KINDS) {
+        media[kind]?.models.forEach((model, modelIndex) => {
+          for (const [field, message] of mediaModelIssues(kind, model)) issue(`${path}/media/${kind}/models/${modelIndex}/${field}`, message);
+        });
+      }
+      for (const kind of ["image", "audio"] as const) {
+        const keys = media[kind]?.configuration;
+        if (!keys) continue;
+        if (kind === "image" && !media.image!.recoverable) issue(`${path}/media/image/configuration`, "requires recoverable image generation");
+        for (const key of keys) {
+          const field = manifest.configuration?.[key];
+          if (!field || !["text", "select", "boolean", "json"].includes(field.type))
+            issue(`${path}/media/${kind}/configuration`, `${key} must name a text, select, boolean or json setting`);
+        }
+      }
+      const backgroundRemoval = media.image?.backgroundRemoval;
+      if (media.image?.maxMinutes && !media.image.recoverable)
+        issue(`${path}/media/image/maxMinutes`, "requires recoverable image generation");
+      if (backgroundRemoval) {
+        if (media.image?.models.some(model => model.id === backgroundRemoval.id)) issue(`${path}/media/image/backgroundRemoval/id`, "must differ from generation model IDs");
+        for (const [field, message] of mediaModelIssues("image", backgroundRemoval)) issue(`${path}/media/image/backgroundRemoval/${field}`, message);
+      }
+      const processing = media["3d"]?.processing;
+      if (processing) {
+        if (!media["3d"]?.inputFiles) issue(`${path}/media/3d/processing`, "processing requires inputFiles");
+        if (processing.animationSourceAxis && !processing.operations.includes("animate")) issue(`${path}/media/3d/processing/animationSourceAxis`, "requires animate");
+        if (media["3d"]?.models.some(model => model.id === processing.id)) issue(`${path}/media/3d/processing/id`, "must differ from generation model IDs");
+        for (const [field, message] of mediaModelIssues("3d", processing)) issue(`${path}/media/3d/processing/${field}`, message);
+      }
+      if (!capabilities.network?.length)
+        issue(`${path}/media`, "media needs capabilities.network, the hosts its adapter reaches");
+    }
   });
 
   const processes = new Set(capabilities.processes);
@@ -1171,7 +1758,8 @@ export function validatePluginManifest(value: unknown): PluginManifestResult {
     if (syntax) issue(path, syntax);
     if (server.env && Object.keys(server.env).some((key) => key.toUpperCase() === PLUGIN_DATA_ENV))
       issue(`${path}/env`, `${PLUGIN_DATA_ENV} is set by the app`);
-    for (const name of configReferences(server)) {
+    // The guide is text for the person; only how the server starts can name settings.
+    for (const name of configReferences({ ...server, setup: undefined, docs: undefined })) {
       const field = manifest.configuration?.[name];
       if (!field) issue(path, `no configuration field ${name}`);
       else if (field.type === "secret" && !capabilities.secrets)
@@ -1287,13 +1875,14 @@ export function satisfiesVersionRange(version: string, range: string): boolean {
   return atLeast && isNewerPluginVersion(upper, parsed.core);
 }
 
-/** Why this host can't run a plugin, or undefined when it can. */
+/** Checks a declared API range even if the rest of the manifest is invalid. */
 export function pluginApiIssue(
-  manifest: Pick<PluginManifestV2, "engines">,
+  manifest: unknown,
   hostApi = PLUGIN_HOST_API_VERSION,
 ): { message: string; fix: PluginVersionFix } | undefined {
+  if (!isRecord(manifest) || !isRecord(manifest.engines)) return undefined;
   const range = manifest.engines["ohmygame-api"];
-  if (satisfiesVersionRange(hostApi, range)) return undefined;
+  if (!Check(VersionRange, range) || satisfiesVersionRange(hostApi, range)) return undefined;
   const lowest = /\d+\.\d+\.\d+/.exec(range)?.[0];
   return lowest && isNewerPluginVersion(lowest, hostApi)
     ? {

@@ -41,6 +41,12 @@ initial window. First-run setup shares this window with the home screen, so
 finishing setup does not resize it. Playtest and capture windows keep their
 explicit content dimensions.
 
+On Windows and Linux, zoom accepts both forms of the key next to Backspace,
+shifted or not: **Ctrl+=** and **Ctrl++** zoom in, **Ctrl+-** and **Ctrl+_** out.
+The shortcut acts on the focused page, including an embedded Browser tab or the
+game view in Preview and Play. **Ctrl+0** resets, and macOS keeps its native
+menu shortcuts.
+
 Bun 1.4.2 installs dependencies and executes builds, tests, and most preparation
 scripts. Pinned Plugin archives are prepared with Node and store their entries
 uncompressed, so their locked ZIP checksums do not depend on the zlib build;
@@ -144,7 +150,8 @@ version resumes at `start`.
 
 Settings → Providers and the setup list share one grouping. Every working
 connection, including free cloud and local services, is under **Connected
-providers**. Unconnected providers follow as **Free cloud**, **Popular
+providers**. In Settings, a plugin's providers stay under **From plugins**,
+connected or not. Unconnected providers follow as **Free cloud**, **Popular
 providers** (OpenAI, Anthropic, OpenRouter, Google, DeepSeek, Meshy, Tripo,
 filtered by capability), **Local providers**, and the collapsed **More
 providers**.
@@ -224,6 +231,48 @@ schema is cached for five minutes for the current endpoint, tool, and bearer
 token. Discovery and search share a 25-second timeout and the caller's
 cancellation signal. A failed discovery is reported rather than sending guessed
 arguments. The optional bearer token is used for both discovery and search.
+
+## Agent instructions
+
+OhMyGame adds its own instructions to the agent's in every conversation, by
+kind of project (`src/daemon/agent-prompts.ts`). **Settings → Agents → Agent
+instructions** shows them as a new project of each kind gets them, and keeps
+the person's own instructions, which come after OhMyGame's in every project,
+for OhMyGame's agent and the coding agents alike. They are told to give way
+to the current request. A project's `AGENTS.md` still adds its own.
+
+Detailed panel and Scene video-trimming contracts live in
+`src/daemon/project-guides.ts`. The base prompt routes relevant requests to the
+read-only `project_guide` tool (`panels` or `scene-media`), available in normal
+and planning mode, coding-agent tool bridges and external MCP. Browser service
+instructions and setup tools remain available when Web preview is disabled,
+but are omitted for known native plugin project types. Other General projects
+must choose the integration for their actual target.
+
+The person's instructions are in `agent-instructions.json` in the data
+directory, `{ "version": 1, "text": "…" }`, at most 8,000 characters after
+trimming; blank text clears them. A file this version can't read is left as
+it is: no instructions are used from it and saving new ones is refused until
+it is fixed or removed. Saving restarts idle sessions, so a conversation uses
+the new instructions from its next message.
+
+**This conversation's instructions**, in the conversation menu, shows the
+system prompt and tool names and descriptions recorded for OhMyGame's agent, section by
+section, read from the conversation's transcript, and the workspace restore
+notice each request adds while there is one. A coding agent keeps its own
+instructions to itself. For a coding agent, the view assembles OhMyGame's
+additional instructions from the current project, plugin and user configuration;
+it is not a snapshot of its last turn. Copy includes prompt text only, not tool
+schemas or every model input. Claude Code, Codex and
+OpenCode get these each time their process starts; a plugin's ACP agent gets
+them with a new session's first prompt and again, as a replacement, with the
+first prompt of a process that continues the session.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /settings/agent-instructions` | The person's instructions, why they can't be used if they can't, and OhMyGame's for each kind of project |
+| `PUT /settings/agent-instructions` | Save `{ custom }`; 400 over the limit, 409 while the saved file can't be read |
+| `GET /projects/:p/conversations/:c/instructions` | What the conversation's agent is told |
 
 ## Network proxy
 
@@ -387,6 +436,19 @@ Calls are sequential, abort with the Agent turn, and time out after 30 seconds.
 Sessions are destroyed when explicitly closed, when the daemon or Electron app
 shuts down, or after an open failure. At most four sessions may remain open at
 once, which bounds hidden-window resource use if an Agent misses cleanup.
+
+`actTogether` plays several open sessions as players of one multiplayer game.
+It takes two to four `players`, each a session and its 1 to 20 actions, and
+starts every player's actions at once, so held keys overlap; one call is still
+one sequential tool call. `samples`, up to five increasing times from 0 to
+10,000 ms after the start, read every session's game state from the bridge's
+`snapshot` at the same moment while the players act, and are refused when no
+session has a `snapshot`. The first player whose action fails stops the
+others, releasing any key they hold, and the error names that player and
+says when each player ended. The result has every player's state in the
+request's order and `timing`: the milliseconds each player's actions took and
+the whole run, so overlapping players show they acted at once. Plugin runtimes and
+plugins playing a project's game do not offer it.
 
 The Preview toolbar can reveal the same isolated windows in a watch mode. These
 are independent, movable, resizable native windows with the normal macOS title
@@ -606,8 +668,8 @@ Minimize, Maximize or Restore, and Close in the app's colours over the page's
 top right corner. The controls remain available when Community asks to unpublish
 a game or the application shows its error page. Back and Forward lead the
 sidebar and the project rail.
-The top bar holds the project's name as its menu (**Project settings…**,
-**Plugins…**, **Open in folder** in the desktop app, **Export project** and the
+The top bar holds the project's name as its menu (**Project settings**,
+**Plugins**, **Open in folder** in the desktop app, **Export project** and the
 plugins' own commands), the record button only while the game runs, **Play** while the Game
 panel isn't on screen, which shows it, and the **Publish** menu, which an asset
 canvas does not have and Godot and plugin projects show disabled. Publish sends the game to the
@@ -635,6 +697,69 @@ returning or refreshing.
 Pages outside a project share one sidebar: Search, Home, Projects, Library,
 Community, Plugins, **Quick access**, and the account.
 
+### Library
+
+The Library page holds the media the person put there, to reuse across
+projects:
+
+- files uploaded on the page, with **Upload** or by dropping them on it;
+- project files saved with **Save to Library** in the project's file tree;
+- game recordings, and videos trimmed on the Library page;
+- items added from a plugin's source.
+
+These are its **Local** tab. Each [Library source](plugins.md#library-sources)
+a plugin offers gets a tab beside it, searched with the page's search box;
+nothing from a source is stored until the person adds it, and then it shows
+in Local with its author, license and link. Browsing a source by kind,
+without search words, is kept while the app runs (the twenty used last, with
+the pages loaded and where the page was scrolled), for the `cacheSeconds` its
+manifest gives or ten minutes, so coming back to its tab or the Library
+doesn't ask the plugin again. A search with words always asks; **Refresh**
+asks anew, and a source whose plugin goes off is forgotten. A picture of at
+most 128 × 128 pixels, in Local or a source, shows whole with each pixel kept
+square, as pixel art is meant to look.
+
+Agents read it with `library_search` (`src/daemon/library-agent-search.ts`),
+in OhMyGame's conversations, planning included, and through
+[external MCP](external-agents.md). Without `source` it searches the saved
+assets, as this page lists them, by name, prompt and author, and lists the
+turned-on sources with their collections; with `source` it runs that source's
+`search`. A source's results reach the agent without carried pictures or
+sounds, marked as third-party text to treat as data, with a reminder to check
+licenses and credit authors. An answer is reused for the source's
+`cacheSeconds` or ten minutes, and one conversation may ask a source ten times
+a minute, so an agent can't spend a site's request limit.
+
+`library_use` copies one into the project under `assets/imported/`, as the
+canvas does: one of the person's saved assets at once, and a source's result,
+one library_search showed in the same conversation, only after the person
+allows it there; it is then added to the Library as from its tab. An agent outside OhMyGame has
+no conversation to ask in, so it takes only saved assets. A copy whose asset
+carries an author or license gets a line in the workspace's `CREDITS.md`, made
+when missing. Game agents' instructions ask them to look here before
+generating media, and to generate what neither the Library nor a source has.
+
+Media a project generates or uploads, on the canvas or in chat, stays with
+that project and doesn't show in the Library until someone saves it. The
+project's own asset panel and its Library pickers are unchanged.
+
+Behind the page, `<data>/library/` stores every media file projects share by
+ID: `files/<id><ext>` and `assets.json`. A record's `saved` says whether the
+Library page shows it. A file stored for a project is cloned into the project
+where the disk can (APFS), so it takes space once.
+
+**Remove from Library** never touches a project: a file a project uses stays
+stored for it and only leaves the page, and a file nothing uses is deleted.
+When a project's usage can't be read, the file is kept.
+
+`assets.json` version 1 put everything generated or uploaded in the Library.
+At startup it is upgraded to version 2 once. The Library keeps what the person
+chose: project files they saved, uploaded videos and audio (game recordings
+and trims, which version 1 can't tell from other uploads) and built-in media.
+Everything else leaves the page but stays stored, so projects and
+conversations still find it. A store from a newer version is never
+rewritten; it is reported as unreadable.
+
 Quick access and the rail show the same list (`src/renderer/sidebar-projects.ts`,
 saved in browser storage). Its order is the person's: editing a project doesn't
 move it, a new project starts at the top, and dragging a project, or Alt with
@@ -645,7 +770,7 @@ closed, or dragged into place. Home's **Recent projects** stays sorted by last
 edit.
 
 The account's menu opens Settings (also **⌘,** or **Ctrl+,**), Account and About;
-signed out, it leads with **Sign in…**.
+signed out, it leads with **Sign in**.
 
 Search, in the sidebar and the project rail, opens the command menu (also
 **⌘K** or **Ctrl+K** anywhere; `src/renderer/command-menu.tsx`). Typing filters
@@ -705,8 +830,8 @@ links (`#/web-game`, `#/interactive-story`, `#/godot`, `#/asset-canvas`,
 Projects lists every project as covers or as a list (name, type and when it
 was edited); the layout choice stays in that browser. Search, the type filter
 and sorting sit beside the title, and **New project** opens a menu: **New
-project…** (the same dialog as Home), **Import folder…** (desktop app) and
-**Import project ZIP…**. Cards and rows share one menu, from **…** or a
+project** (the same dialog as Home), **Import folder** (desktop app) and
+**Import project ZIP**. Cards and rows share one menu, from **…** or a
 right-click: open, rename, duplicate, open in folder (desktop app), export and
 delete, which asks first in a dialog.
 
@@ -716,6 +841,79 @@ existing folder. It is available in recent projects and the Projects list.
 See the [project menu example](assets/project-card-menu.png).
 The desktop file opener resolves `.` through `/projects/:projectId/files/location`
 to open the workspace root; file reads and writes still require a file path.
+
+## Browser panel
+
+In the desktop app, every project offers **Browser** in a panel area's **+**
+menu. It starts closed. The panel has its own tabs, back/forward and reload
+controls, an address/search box, and an action to open the current page in the
+system browser. Bare host names open over HTTPS; localhost opens over HTTP;
+other text searches with the selected engine (Bing initially). In agent
+conversations, hover or focus a web link to reveal the action that opens it in
+a new Browser tab. Clicking the link itself opens the system browser.
+
+![Browser panel showing a web page](assets/browser-panel.png)
+
+New tabs show editable shared shortcuts, shortcuts from active plugins and
+this project's most visited pages. Edit mode lets you reorder personal
+shortcuts, and you can remove a most-visited page individually. The search
+engine and up to 24 personal shortcuts are shared across projects. You can
+hide shortcuts contributed by plugins and restore them from the hidden list
+on the new-tab page. Each project keeps up to 20 tabs and the 200 most
+recently visited addresses. Closing or moving the panel keeps tabs
+alive; leaving the project closes their views, and reopening restores their
+addresses and selected tab. Navigation back/forward stacks are not persisted.
+A page-driven address longer than 4,000 characters returns as a blank tab on
+reopen; other tabs and visits continue to save.
+
+![New tab with shortcuts and this project's visited pages](assets/browser-new-tab.png)
+
+`src/desktop/browser-views.ts` owns sandboxed `WebContentsView` instances.
+They share `persist:ohmygame-browser`, separate from the app and game preview,
+so website sign-ins persist across projects and restarts. Hidden tabs stay
+muted. Pages have no Node access or app preload; camera, microphone, location
+and other permissions outside clipboard writes, fullscreen and pointer lock
+are refused. HTTP(S) links open in tabs, with sized sign-in popups retaining
+their opener. The panel is unavailable in the web app.
+
+`src/daemon/browser-store.ts` keeps version-1 `browser-settings.json` in app
+data and version-1 `browser.json` beside each project's records, never inside
+the game workspace. Unreadable or newer files are left untouched and writes
+are refused. The renderer is `src/renderer/browser-panel.tsx`; plugin
+[shortcuts and opening requests](plugins.md#browser) use the same panel.
+
+Use **Clear browsing data** on a new tab to remove cookies, website data and
+cache for all projects, and optionally clear the current project's browsing
+history. Clearing shared website data signs you out and reloads loaded tabs.
+Clearing history keeps the project's open tabs.
+
+### Agent browsing and page text
+
+`browser_use` operates the same Browser tabs as the person. It reveals the
+panel for the project currently open in the desktop app and waits for tab
+restoration before starting. `tabs` lists existing tabs; `open` creates a tab;
+`navigate`, `read`, `act`, `capture` and `close` take a `tabId`. Actions use the
+same CDP input and target helpers as game playtesting. Reads return up to 100
+interactive elements and 4,000 characters of visible text; captures use JPEG
+at the page's logical pixel size. Semantic targets address the main document;
+use screenshot coordinates for embedded content. The tool accepts no page
+scripts. Password values are excluded from element labels.
+
+Only one browser request runs per project at a time. Closing or switching the
+active tab stops a batch before its next action, and cancellation releases
+held keys. A conversation ending does not close the person's tabs. The tool's
+instructions hand login, payment and CAPTCHA steps to the person and treat
+page content as untrusted material. Browser use is unavailable in planning
+mode; `web_fetch` remains available for research.
+
+`web_fetch` reads HTTP(S) HTML or text without JavaScript or browser cookies.
+It returns the final URL, title, text and a truncation flag. HTML extraction
+prefers `main` or `article`, removes scripts and navigation, and resolves links.
+Requests have a 20-second deadline, at most five redirects and a 2 MiB download
+limit; returned text defaults to 20,000 characters and can be set to 1,000–50,000.
+Binary files are rejected. Both tools are also available to coding agents and
+the [external MCP server](external-agents.md); browser use still requires the
+selected project to be open in the desktop app.
 
 ## Workspace panels
 
@@ -810,10 +1008,48 @@ keeps its open folders and scroll position, and the open file stays on screen,
 also when the refresh fails. Only choosing or opening a file, or coming back from
 Changes, which builds the tree anew, scrolls the tree.
 
+## Desktop background running
+
+**Settings → General → Keep running after closing the window** is off by
+default. With it on, closing the main window hides it without unmounting the
+workspace: agents, pending approvals, scheduled messages and plugin connections
+keep their existing owners. Reopening restores the same window, selections and
+view position. The option does not start the app at login or keep connections
+online through computer sleep.
+
+On Windows, a system tray icon offers **Open OhMyGame** and **Exit**; clicking
+its icon also restores the window. The tray must be created successfully before
+close-to-background is enabled. On macOS, the Dock restores the window and
+**Quit OhMyGame** exits. With the option off, Windows retains close-to-quit and
+macOS retains its existing close-window behavior (the app stays in the Dock).
+Launching the app again restores the existing instance for that user-data
+profile instead of starting another daemon.
+
+Quit, restart and update installation still wait for workspace saving before
+stopping services. A failed Quit shows the window again so its save error can
+be resolved. Hiding does not enter the renderer's closing state or cancel work.
+
+The main process owns `background-running.json` in the app's data directory
+(`version: 1`, boolean `enabled`). It loads before the first window; writes are
+serialized and atomic, preserve unknown fields, and refuse malformed or newer
+files. A failed setting change keeps the previous effective value and shows an
+error in Settings. Native handlers accept only the main window's main frame.
+See `src/desktop/background-running.ts` and `test/desktop-close.test.ts`.
+Bot-plugin enablement prompts belong to the later sessions/plugin stage.
+
 ## Agent notifications
 
 The desktop app shows a system notification when an agent needs the user or
 has finished, in any project, including while the main window is closed.
+
+Recent Projects, the Projects grid and list, and the sidebar show when a
+project has a new result or needs input. The editor's project rail shows which
+conversation needs attention. Opening the corresponding conversation at the
+end of its timeline in a focused window clears a new result. An approval,
+question, or plan stays marked until it is resolved. These indicators work
+independently of desktop notification preferences. Unread results are kept
+across navigation for the current app session and reset on app reload or
+service restart.
 
 - The daemon's `AgentNoticeLog` (`src/daemon/agent-notices.ts`) reads runtime
   events from every project. It records an approval request, a question, a
@@ -833,10 +1069,16 @@ has finished, in any project, including while the main window is closed.
   the main window first if it was closed.
 - While the window is in the background, a request also bounces the Dock icon
   once on macOS or flashes the taskbar button on Windows. The Dock badge
-  counts conversations waiting for the user. Windows has no count on taskbar
-  buttons, so a red dot overlays the taskbar button instead.
-- On Windows, closing the main window quits the app, so notifications arrive
-  only while the window is open, minimized or in the background.
+  counts waiting conversations and unread results received while the window
+  was in the background. Windows shows a dot on the taskbar and tray icons,
+  with counts in the overlay description and tray tooltip. The same visible
+  timeline that clears the in-app result clears the corresponding native
+  unread result; focusing the app or switching conversations alone does not.
+  Native unread results reset when notifications are turned off or the daemon
+  restarts, and still count when the OS blocks notification banners.
+- On Windows, closing the main window quits the app unless desktop background
+  running is enabled. With it enabled, notifications also arrive while hidden
+  in the system tray.
 - **Settings → Notifications** has one switch that turns notifications off.
   It preserves the earlier General → Notifications choice when upgrading.
   Desktop completion notices use this main-process path; browser notifications
@@ -999,14 +1241,30 @@ limit or the story publish-copy optimizations.
 
 Each publish creates an immutable Deployment of the same Game, so the play link
 stays the same. The project stores only the publication identity: Game ID,
-Deployment ID, play URL, publish time, and the published title and description.
+Deployment ID, play URL, publish time, the published title and description, and
+the game's page name and address.
+
+The address people share is the game's page, `pageUrl`
+(`https://www.ohmygame.ai/g/<name>`, shown as `ohmygame.ai/g/<name>`): the
+website plays the game there with its loading screen and dock. `playUrl` is the
+bare game, which the desktop embeds. Every game starts with a generated
+six-character name; once published, its owner can change it from the
+publication details (`PUT /community/games/:gameId/name`, with
+`GET /community/game-names/:name?gameId=` to check a name while typing). The
+name before stays with the game and redirects to the new one until the next
+rename frees it. A Cloud without pages leaves `name` and `pageUrl` out, and the
+app shares `playUrl` instead. A publication saved without a page (published
+before the Cloud named games) gets it from the owner's games when the
+publication details open, and loading the owner's games
+(`GET /community/me/games`) brings every publication up to date. The name can
+only be changed once `pageUrl` is a `/g/<name>` page. The Cloud's rules are in its `docs/publish-v1.md`.
 
 ### Community and creator profiles
 
 ![Creator profile with published game covers](assets/community-profile.webp)
 
 Community displays games in a responsive grid with 16:10 covers, titles, creator
-links, and view/like counts visible below each cover. Search across title,
+links, and view/like/comment counts visible below each cover. Search across title,
 description, and author, sorting by first listing, views, or likes, the
 first-listed time filter, and reset stay above the grid. Clicking or tapping the
 cover opens the game detail, including on the owner's profile; creator links and
@@ -1030,6 +1288,16 @@ long enough not to flash. Likes and edits made on one page update the kept
 copies. A different account, or signing out, clears them, so likes and an
 owner's hidden works never carry over; a game that is no longer found leaves
 them too.
+
+A listed game's page shows its comments under the description, newest first,
+20 at a time (`GET /community/games/:gameId/comments[?cursor=]`). Anyone can read
+them; writing one needs an account (`POST` with `accessToken` and `body`, plain
+text up to 500 characters), and signed-out viewers see a sign-in button instead.
+The commenter can delete their own comment, and the game's creator any comment on
+their game (`DELETE /community/comments/:commentId`). Reads go to the Cloud
+without an account or visitor credential. Hidden games show no comments. Local
+debug publishing keeps comments in memory for the daemon session. The website's
+game page shows the same comments read-only.
 
 Author links open their public profile with listed works. **My games**, next to
 the search and in the account menu, opens your own profile; it requires sign-in

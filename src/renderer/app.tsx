@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
+import { ProjectAttentionProvider } from "./project-attention.js";
 import { Home } from "./home.js";
 // Only lazy routes use this; loading it eagerly keeps it ahead of styles.css as before code splitting.
 import "./plugin-builder.css";
@@ -38,11 +39,11 @@ const PluginBuilder = lazy(() => import("./plugin-builder.js").then((module) => 
 export function App() {
   const navigation = useAppNavigation();
   useRunAlerts((projectId) => navigation.navigate(projectHash(projectId)));
-  return <>
+  return <ProjectAttentionProvider>
     <AppRoute navigation={navigation} />
     <CommandMenuHost navigate={navigation.navigate} />
     <GameRecordingNotices />
-  </>;
+  </ProjectAttentionProvider>;
 }
 
 function AppRoute({ navigation }: { navigation: ReturnType<typeof useAppNavigation> }) {
@@ -86,7 +87,7 @@ function AppRoute({ navigation }: { navigation: ReturnType<typeof useAppNavigati
       : <PageFrame active="home" onNavigate={navigateToSidebarPage}><OnboardingLoading /></PageFrame>;
   }
   if (route.page === "plugin-builder") return <Suspense fallback={<RouteLoading />}><PluginBuilder key={route.sessionId} sessionId={route.sessionId} conversationId={route.conversationId}
-    onOpenConversation={(conversationId, replace) => navigate(pluginBuilderHash(route.sessionId, conversationId), { replace })} onNavigate={navigateToSidebarPage} /></Suspense>;
+    onOpenConversation={(conversationId, replace) => navigate(pluginBuilderHash(route.sessionId, conversationId), { replace })} onNavigate={navigateToSidebarPage} onTryPlugin={tryPlugin} /></Suspense>;
   if (route.page === "settings") {
     return <Suspense fallback={sidebarFallback("settings")}><SettingsPage section={route.section} agent={route.agent} onSectionChange={navigateToSettingsSection} onNavigate={navigateToSidebarPage} onOpenOnboarding={onboarding.open} /></Suspense>;
   }
@@ -200,8 +201,8 @@ function AppRoute({ navigation }: { navigation: ReturnType<typeof useAppNavigati
     navigate(settingsHash(section, agent), agent ? { state: historyState() } : { replace: true, state: historyState() });
   }
 
-  function navigateToPlugin(pluginId?: string): void {
-    navigate(pluginHash(pluginId), { replace: true, state: historyState() });
+  function navigateToPlugin(pluginId?: string, tab?: "installed"): void {
+    navigate(pluginHash(pluginId, tab), { replace: true, state: historyState() });
   }
 
 }

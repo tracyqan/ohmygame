@@ -1,32 +1,36 @@
-import { useEffect, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import type { ProjectAgentActivity, ProjectState } from "../shared/contracts.js";
-import { useProjectStatus, useProjectStatusStream } from "./project-status.js";
+import { streamProjectActivity } from "./api.js";
 
 type ProjectActivity = ReadonlyMap<string, ProjectAgentActivity["status"]>;
 
-/**
- * Follow activity for all project cards together over the app's one stream.
- * The sidebar shows the same activity on the project icons, so the stream and
- * what it last said live in `project-status`.
- */
+/** Follow activity for all project cards together over one stream. */
 export function useProjectActivity(enabled: boolean, setProjects?: Dispatch<SetStateAction<ProjectState[]>>): ProjectActivity {
-  useProjectStatusStream(enabled);
-  const { running, names } = useProjectStatus();
+  const [activity, setActivity] = useState<ProjectActivity>(() => new Map());
 
   useEffect(() => {
-    if (!setProjects || !names.length) return;
-    const latest = new Map(names.map((project) => [project.id, project]));
-    setProjects((previous) => {
-      let changed = false;
-      const next = previous.map((project) => {
-        const named = latest.get(project.id);
-        if (project.nameSource !== "default" || !named?.nameSource || named.nameSource === "default") return project;
-        changed = true;
-        return { ...project, name: named.name, nameSource: named.nameSource };
+    if (!enabled) return;
+    const controller = new AbortController();
+    void streamProjectActivity(controller.signal, ({ activity: current, names }) => {
+      setActivity((previous) => (
+        previous.size === current.length && current.every(({ projectId, status }) => previous.get(projectId) === status)
+          ? previous : new Map(current.map(({ projectId, status }) => [projectId, status]))
+      ));
+      if (!setProjects) return;
+      const latest = new Map(names.map((project) => [project.id, project]));
+      setProjects((previous) => {
+        let changed = false;
+        const next = previous.map((project) => {
+          const named = latest.get(project.id);
+          if (project.nameSource !== "default" || !named?.nameSource || named.nameSource === "default") return project;
+          changed = true;
+          return { ...project, name: named.name, nameSource: named.nameSource };
+        });
+        return changed ? next : previous;
       });
-      return changed ? next : previous;
     });
-  }, [names, setProjects]);
+    return () => controller.abort();
+  }, [enabled, setProjects]);
 
-  return running;
+  return activity;
 }

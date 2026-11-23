@@ -55,8 +55,6 @@ vi.doMock(path.resolve("src/renderer/api.ts"), () => ({
   ],
   waitForRuntime: async () => undefined,
   getProjectCover: async () => undefined,
-  // The sidebar follows the activity stream; this rail test never sends one.
-  streamProjectActivity: async () => undefined,
 }));
 const { PageFrame } = await import("../src/renderer/page-frame.js");
 const { ProjectRail } = await import("../src/renderer/app-sidebar.js");
@@ -305,8 +303,8 @@ it("leads the signed-out menu with sign in and keeps settings and about", async 
     sidebar().querySelector<HTMLButtonElement>(".sidebar-account")!;
   expect(account.textContent).toBe("Sign in");
   await act(async () => account.click());
-  expect(menuLabels()).toEqual(["Sign in…", "Settings", "About OhMyGame"]);
-  await act(async () => button("Sign in…")!.click());
+  expect(menuLabels()).toEqual(["Sign in", "Settings", "About OhMyGame"]);
+  await act(async () => document.querySelector<HTMLButtonElement>(".ui-menu-item")!.click());
   expect(auth.openSignIn).toHaveBeenCalledOnce();
 
   await act(async () => account.click());

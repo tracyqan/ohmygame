@@ -49,6 +49,8 @@ const ACP_PROBE_TIMEOUT_MS = 45_000;
 
 export interface ResolvedBinary {
   path: string;
+  /** Current filesystem target, resolved while checking the candidate. */
+  realPath: string;
   source: AgentRuntimeBinarySource;
   /** Changes when the CLI is updated in place, so a cached probe is not trusted past it. */
   signature: string;
@@ -62,9 +64,11 @@ export function isCodexNpmShim(binaryPath: string): boolean {
   );
 }
 
-/** A script that can be chosen as a CLI: Codex's npm shim, or the npm shim of an ACP agent, which is read instead of run. */
+/** A script that can be chosen as a CLI: an npm shim of Codex, OpenCode or an ACP agent, which is read instead of run. */
 export function isReadableShim(id: AgentRuntimeId, binaryPath: string): boolean {
   if (id === "codex-cli") return isCodexNpmShim(binaryPath);
+  if (id === "opencode-cli")
+    return process.platform === "win32" && npmShimTarget(binaryPath) !== undefined;
   return process.platform === "win32" && Boolean(agentRuntimeDefinition(id).acp) && npmShimTarget(binaryPath) !== undefined;
 }
 
@@ -73,8 +77,8 @@ export function isReadableShim(id: AgentRuntimeId, binaryPath: string): boolean 
  * those on PATH, the login shell's PATH, the usual install folders and the
  * copies other apps bundle. A computer often has several, such as an old
  * global npm install next to the Codex in the ChatGPT app, and the oldest one
- * found first may not know the account's current models. The result is an
- * absolute path that is then always run as is.
+ * found first may not know the account's current models. The result includes
+ * both the selected absolute path and its current filesystem target.
  */
 export async function resolveBinary(
   id: AgentRuntimeId,
@@ -136,6 +140,35 @@ export async function resolveBinary(
       }
     }
   }
+  // OpenCode's npm package likewise keeps its native CLI inside the package,
+  // under the current @opencode/cli name and the former opencode-ai one.
+  if (id === "opencode-cli" && process.platform === "win32") {
+    if (override) {
+      if (/\.cmd$/i.test(override) && isReadableShim(id, override)) {
+        const target = npmShimTarget(override);
+        // Node entries keep the shim so launchCommand preserves their interpreter.
+        if (target && target.args.length === 0)
+          candidates.splice(0, candidates.length, {
+            path: target.file,
+            source: "manual",
+          });
+      }
+    } else {
+      const directories = new Map(
+        candidates.map((candidate) => [
+          path.dirname(candidate.path),
+          candidate.source,
+        ]),
+      );
+      for (const [directory, source] of directories)
+        candidates.push(
+          ...["@opencode/cli", "opencode-ai"].map((pkg) => ({
+            path: path.join(directory, "node_modules", pkg, "bin", "opencode.exe"),
+            source,
+          })),
+        );
+    }
+  }
   const found: ResolvedBinary[] = [];
   const seen = new Set<string>();
   for (const candidate of candidates) {
@@ -156,6 +189,7 @@ export async function resolveBinary(
       seen.add(target);
       found.push({
         ...candidate,
+        realPath: target,
         signature: `${candidate.path}:${info.size}:${info.mtimeMs}`,
       });
     } catch {

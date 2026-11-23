@@ -36,15 +36,18 @@ import {
   Server,
   Tablet,
   Terminal,
+  Plug,
   Trash2,
   X,
   type IconComponent,
 } from "./icons.js";
+import { usePluginSlot } from "./project-plugin-contributions.js";
 import { Fragment, lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Tree, type NodeRendererProps, type TreeApi } from "react-arborist";
 import { isBuiltinPreviewViewport, PREVIEW_VIEWPORTS } from "../shared/contracts.js";
 import type { PreviewViewport, ProjectFileOpenMode, ProjectState, WorkspaceFile, WorkspaceFileContent } from "../shared/contracts.js";
+import type { GameRename } from "../shared/publish-v1.js";
 import type { ProjectInputMap, ProjectPreviewDevice, ProjectPreviewFilter } from "../shared/plugins.js";
 import { colorMatrixValues, type PreviewColorFilter } from "../shared/preview-filter.js";
 import type { GamepadKeyMap } from "../shared/preview-input.js";
@@ -110,6 +113,8 @@ interface CodingWorkspaceProps {
   onDesignSaveReady?: (save: (() => Promise<void>) | undefined) => void;
   onDesignContextChange?: (context: import("../shared/contracts.js").PromptContext | undefined) => void;
   onProjectUpdated?: (project: ProjectState) => void;
+  /** The published game's page was renamed from the publish dialog. */
+  onGameRenamed?: (renamed: GameRename) => void;
   openFileRequest?: { path: string; id: number };
   /** The design document the next message references, by its workspace path. */
   referencedDocument?: string;
@@ -167,6 +172,7 @@ export function CodingWorkspace({
   onDesignSaveReady,
   onDesignContextChange,
   onProjectUpdated,
+  onGameRenamed,
   openFileRequest,
   referencedDocument,
   onReferenceDocument,
@@ -428,7 +434,8 @@ export function CodingWorkspace({
           pickDisabled={!project || preview?.status !== "ready" || player.open}
           tuningOpen={tuningOpen}
           onToggleTuning={buildsWebPreview(project) ? undefined : () => setTuningOpen((open) => !open)}
-          onLogs={() => setLogsOpen(true)}
+          logsOpen={logsOpen}
+          onLogs={() => setLogsOpen((open) => !open)}
           onNavigate={navigatePreview}
           onRefresh={refreshPreview}
           onRestart={() => onRestart()}
@@ -457,9 +464,8 @@ export function CodingWorkspace({
         ) : null}
       </>,
     } : project && gamePanelAddable(project) ? {
-      // Added by the person to a General project: the switch is in Project settings.
-      body: <Empty icon={<Globe2 size={20} />} title={t("workspace.webPreviewOff")} description={t("workspace.webPreviewOffHint")}
-        action={onOpenSettings ? <Button onClick={onOpenSettings}>{t("workspace.openProjectSettings")}</Button> : undefined} />,
+      // A General project without its web preview: its engine's plugins say how to play it, else the switch is in Project settings.
+      body: <GameStartEmpty onOpenSettings={onOpenSettings} />,
     } : undefined,
     design: project ? {
       toolbar: <div className="viewer-publish design-doc-toolbar" ref={setDocumentToolbar} />,
@@ -530,7 +536,7 @@ export function CodingWorkspace({
     <>
       {placed}
       {topPlay}
-      {project && publishDialog ? <PublishDialog project={project} publishing={publishing} justPublished={publishDialog === "success"} onClose={onClosePublish} onPublish={onPublish} /> : null}
+      {project && publishDialog ? <PublishDialog project={project} publishing={publishing} justPublished={publishDialog === "success"} onClose={onClosePublish} onPublish={onPublish} onRenamed={onGameRenamed} /> : null}
       {project && settingsSlot ? createPortal(<ProjectPreviewSettings
         project={project}
         previewDevices={previewDevices}
@@ -567,6 +573,7 @@ function PreviewControls({
   pickDisabled,
   tuningOpen,
   onToggleTuning,
+  logsOpen,
   onLogs,
   onNavigate,
   onRefresh,
@@ -596,6 +603,7 @@ function PreviewControls({
   tuningOpen: boolean;
   /** Absent when this game can't be tuned. */
   onToggleTuning?: () => void;
+  logsOpen: boolean;
   onLogs: () => void;
   onNavigate: (path: string) => void;
   onRefresh: () => void;
@@ -604,6 +612,7 @@ function PreviewControls({
   onToggleAgentPlaytestWatch: () => void;
   onViewportChange: (viewport: PreviewViewport) => void;
 }) {
+  const gameMore = usePluginSlot("game.more");
   // Like a browser's toolbar: where the preview is, then how it shows, then the rest.
   return (
     <div className="preview-controls">
@@ -623,7 +632,9 @@ function PreviewControls({
       <DropdownMenu placement="bottom-end" trigger={(props) => <IconButton {...props} size="sm" label={t("workspace.moreActions")}><MoreHorizontal size={14} /></IconButton>} items={[
         ...(previewUrl ? [{ label: t("workspace.openInBrowser"), icon: <ExternalLink size={14} />, onSelect: () => openPreviewInBrowser(previewUrl) }] : []),
         { label: t("projectSettings.restartPreview"), icon: <Server size={14} />, disabled: status === "waiting" || status === "starting", onSelect: onRestart },
-        { label: t("workspace.logs"), icon: <Terminal size={14} />, onSelect: onLogs },
+        { label: logsOpen ? t("workspace.closeLogs") : t("workspace.logs"), icon: <Terminal size={14} />, onSelect: onLogs },
+        // The project's plugins' entries for the game, after the app's.
+        ...(gameMore.commands.length ? ["separator" as const, ...gameMore.commands.map((command) => ({ label: command.title, icon: <Plug size={14} />, onSelect: () => void gameMore.run(command) }))] : []),
       ]} />
     </div>
   );
@@ -632,12 +643,11 @@ function PreviewControls({
 /**
  * The page in the person's browser, as a client of its own: sharing the
  * editor's id would take over the editor's reload stream and element picking.
+ * The desktop app sends a new window's web page to the browser; its
+ * openExternal is for sign-in pages and refuses the game's local address.
  */
 function openPreviewInBrowser(url: string): void {
-  const page = isolatedPreviewUrl(url, "external");
-  const external = window.ohMyGameDesktop?.openExternal;
-  if (external) void external(page).catch(() => undefined);
-  else window.open(page, "_blank", "noopener,noreferrer");
+  window.open(isolatedPreviewUrl(url, "external"), "_blank", "noopener,noreferrer");
 }
 
 function PreviewLocation({
@@ -1017,8 +1027,8 @@ export function PreviewView({ project, client, onAskAgent, onOpenFile, onLogs, r
           ref={(element) => { frame.current = element; }}
           key={`${url}:${reload}`} className="preview-frame" src={url}
           title={t("workspace.previewTitle", { name: project?.name ?? t("workspace.project") })}
-          sandbox="allow-forms allow-modals allow-pointer-lock allow-same-origin allow-scripts"
-          allow="gamepad"
+          sandbox="allow-downloads allow-forms allow-modals allow-pointer-lock allow-same-origin allow-scripts"
+          allow="gamepad; clipboard-write"
           style={filter ? { filter: `url(#${filterId})` } : undefined}
           onLoad={(event) => scheduleCoverCapture(event.currentTarget)}
         />}
@@ -1036,6 +1046,8 @@ export function PreviewView({ project, client, onAskAgent, onOpenFile, onLogs, r
           <p className="preview-empty-description">{t("workspace.closeWindowHint")}</p>
           {playerOpen && onPlay ? <button type="button" className="preview-return-button" disabled={pending} onClick={onPlay}>{t("workspace.returnToGame")}</button> : null}
         </div>
+      </div> : !showFrame && project?.type === "general" && preview?.issue === "no-web-project" && preview.status === "waiting" ? <div className="preview-status-panel">
+        <GameStartEmpty noWebProject onOpenSettings={onSettings} />
       </div> : !showFrame ? <div className="preview-status-panel">
         <PreviewState status={preview?.status} error={preview?.error} phase={preview?.phase} startedAt={preview?.startedAt} />
         {(pausedAfterRecovery || preview?.stopReason === "recovery") && preview?.status === "stopped" ? <p>{t("workspace.pausedAfterRecovery")}</p> : null}
@@ -1046,6 +1058,7 @@ export function PreviewView({ project, client, onAskAgent, onOpenFile, onLogs, r
           {onLogs ? <button type="button" onClick={onLogs}>{t("workspace.viewLogs")}</button> : null}
           {preview?.error && onAskAgent ? <button type="button" onClick={() => onAskAgent(previewRepairPrompt(project, preview.error!))}>{t("workspace.askAgent")}</button> : null}
         </div> : null}
+        {preview?.status === "error" ? <GameStartActions /> : null}
       </div> : null}
       {diagnostic ? <div className="preview-diagnostic" role="alert">
         <strong>{diagnostic.kind === "compile" ? t("workspace.compileFailed") : diagnostic.kind === "runtime" ? t("workspace.runtimeError") : t("workspace.loadFailed")}</strong>
@@ -1681,7 +1694,7 @@ function WorkspaceMarkdownPreview({ projectId, revision, file, onOpenFile }: {
   const renderImage = useCallback((src: string | undefined, alt: string | undefined) => (
     <WorkspaceMarkdownImage projectId={projectId} revision={revision} baseDir={baseDir} src={src} alt={alt} />
   ), [projectId, revision, baseDir]);
-  return <MarkdownContent className="file-content-markdown" text={file.content ?? ""} baseDir={baseDir} onOpenWorkspaceFile={onOpenFile} renderImage={renderImage} />;
+  return <MarkdownContent className="file-content-markdown" text={file.content ?? ""} projectId={projectId} baseDir={baseDir} onOpenWorkspaceFile={onOpenFile} renderImage={renderImage} />;
 }
 
 function WorkspaceMarkdownImage({ projectId, revision, baseDir, src, alt }: {
@@ -1928,12 +1941,62 @@ function ProjectAssetTile({ asset, sort, selected, onOpen }: { asset: BrowsableA
 }
 
 function WorkspaceState({ label, error, loading, icon }: { label?: string; error?: string; loading?: boolean; icon?: React.ReactNode }) {
+  // A long message, such as a build's output, shows its first line; the rest is in the details.
+  const text = error ?? label ?? "";
+  const [first, ...rest] = text.split("\n");
+  const details = rest.join("\n").trim();
   return (
     <div className={`workspace-state${error ? " error-state" : ""}`} role={error ? "alert" : undefined}>
       {loading ? <LoaderCircle className="spin" size={20} /> : error ? <X size={20} /> : icon}
-      <span>{error ?? label}</span>
+      <span>{details ? first : text}</span>
+      {details ? <Disclosure summary={t("common.errorDetails")}><pre>{details}</pre></Disclosure> : null}
     </div>
   );
+}
+
+/**
+ * How to play a game the panel can't: its plugins' `game.start` commands,
+ * such as running it in its engine, and the project's settings. An engine's
+ * plugin the folder's files turned on, waiting to be allowed, is offered to
+ * allow first. Without either, the web preview's switch is the way.
+ */
+function GameStartEmpty({ noWebProject = false, onOpenSettings }: { noWebProject?: boolean; onOpenSettings?: () => void }) {
+  const start = usePluginSlot("game.start");
+  const [allowing, setAllowing] = useState<string>();
+  const [failed, setFailed] = useState<string>();
+  // Why it couldn't, such as an agent still working, goes after a while, as the reason may have.
+  useEffect(() => {
+    if (!failed) return;
+    const timer = window.setTimeout(() => setFailed(undefined), 8000);
+    return () => window.clearTimeout(timer);
+  }, [failed]);
+  const waiting = start.commands.length ? [] : start.waiting;
+  const engine = start.commands.length > 0 || waiting.length > 0;
+  const allow = (id: string) => {
+    setAllowing(id);
+    setFailed(undefined);
+    void start.allow(id).catch((cause: unknown) => setFailed(cause instanceof Error ? cause.message : String(cause))).finally(() => setAllowing(undefined));
+  };
+  return <Empty icon={engine ? <Play size={20} /> : <Globe2 size={20} />}
+    title={engine ? t("workspace.playInEngine") : noWebProject ? t("workspace.noWebProject") : t("workspace.webPreviewOff")}
+    description={<>
+      {waiting.length ? t("workspace.allowEngineHint", { name: waiting[0]!.displayName }) : engine ? t("workspace.playInEngineHint") : noWebProject ? t("workspace.noWebProjectHint") : t("workspace.webPreviewOffHint")}
+      {failed ? <span className="game-start-error" role="alert">{failed}</span> : null}
+    </>}
+    action={<div className="game-start-actions">
+      {start.commands.map((command, index) => <Button key={command.id} variant={index === 0 ? "primary" : "secondary"} onClick={() => void start.run(command)}>{command.title}</Button>)}
+      {waiting.map((plugin, index) => <Button key={plugin.id} variant={index === 0 ? "primary" : "secondary"} disabled={allowing !== undefined}
+        onClick={() => allow(plugin.id)}>{t("workspace.allowPlugin", { name: plugin.displayName })}</Button>)}
+      {onOpenSettings ? <Button variant={engine ? "ghost" : "secondary"} onClick={onOpenSettings}>{t("workspace.openProjectSettings")}</Button> : null}
+    </div>} />;
+}
+
+/** A failed build's ways out from the project's plugins, such as installing what the build needs or running it in its engine. */
+function GameStartActions() {
+  const start = usePluginSlot("game.start");
+  return start.commands.length ? <div className="preview-recovery-actions">
+    {start.commands.map((command) => <button key={command.id} type="button" onClick={() => void start.run(command)}>{command.title}</button>)}
+  </div> : null;
 }
 
 function PreviewState({ status, error, phase, startedAt }: { status?: ProjectState["preview"]["status"]; error?: string; phase?: ProjectState["preview"]["phase"]; startedAt?: string }) {
@@ -1955,7 +2018,8 @@ function PreviewState({ status, error, phase, startedAt }: { status?: ProjectSta
 
 function PreviewLogs({ project, onClose }: { project?: ProjectState; onClose: () => void }) {
   const preview = project?.preview;
-  return <aside className="preview-logs" aria-label={t("workspace.logs")}>
+  // The desktop game is a native view above the page, so it steps aside for the logs.
+  return <aside className="preview-logs" aria-label={t("workspace.logs")} data-native-preview-overlay="">
     <header><strong>{t("workspace.logs")}</strong><button type="button" onClick={onClose} aria-label={t("workspace.closeLogs")}><X size={14} /></button></header>
     <p>{preview?.directory ?? project?.startupDirectory ?? "."} · {preview?.command ?? t("workspace.notStarted")}</p>
     {preview?.manager ? <p>{preview.manager} · {preview.managerSource}</p> : null}

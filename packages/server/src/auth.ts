@@ -1,9 +1,9 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { normalizeDisplayName } from "@ohmygame/sdk/protocol";
+import { normalizeDisplayName } from "@ohmygame/game-sdk/protocol";
 import type { KeyObject } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
-import { gameTokenAudience } from "@ohmygame/sdk/account-protocol";
-import type { MultiplayerManifestConfig } from "@ohmygame/sdk/protocol";
+import { gameTokenAudience } from "@ohmygame/game-sdk/account-protocol";
+import type { MultiplayerManifestConfig } from "@ohmygame/game-sdk/protocol";
 
 export interface MultiplayerIdentity {
   userId: string;
@@ -107,6 +107,14 @@ export class MultiplayerAuth {
     } catch {
       throw new Error("The account token is invalid, expired or for another game.");
     }
+  }
+  /**
+   * The player ID of the guest a token names, while that guest could still be renewed:
+   * their data stays that long, so a player signing in after a while away keeps it.
+   */
+  renewableGuest(token: string): string | undefined {
+    const claims = this.readGuest(token);
+    return claims && claims.expiresAt + GUEST_RENEWAL_MS > Date.now() ? `guest:${claims.id}` : undefined;
   }
   /** A test player from this service's local account service, when the token is one. */
   private async localAccount(token: string): Promise<MultiplayerIdentity | undefined> {

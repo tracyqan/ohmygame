@@ -50,11 +50,11 @@ beforeEach(() => {
     storePlugin("unity", "Unity", { ...off, categories: ["engine"] }),
     storePlugin("wechat-minigame", "WeChat Mini Games", { ...off, categories: ["publishing"] }),
     storePlugin("douyin-minigame", "Douyin Mini Games", { ...off, categories: ["publishing"] }),
-    storePlugin("blender", "Blender", { categories: ["art"] }),
+    storePlugin("blender", "Blender", { categories: ["art"], keywords: ["sculpt"] }),
     storePlugin("img2threejs", "Image to Three.js", { bundled: false, preinstalled: true, categories: ["art"] }),
     storePlugin("aseprite", "Aseprite", { ...off, categories: ["art"] }),
     storePlugin("tiled", "Tiled", { ...off, categories: ["art"] }),
-    storePlugin("unreal-engine", "Unreal Engine", { ...off, grants: { enabled: false, allowed: [] }, categories: ["engine"], adds: { projectTypes: [], panels: [], commands: [], mcpServers: ["Unreal"], modelProviders: [], agents: [], tools: 0, skills: 0 } }),
+    storePlugin("unreal-engine", "Unreal Engine", { ...off, grants: { enabled: false, allowed: [] }, categories: ["engine"], adds: { projectTypes: [], panels: [], commands: [], mcpServers: ["Unreal"], modelProviders: [], agents: ["Unreal agent"], tools: 0, skills: 0 } }),
   ];
   vi.stubGlobal(
     "fetch",
@@ -106,7 +106,7 @@ async function renderCatalog(pluginId?: string, tab: "installed" | "discover" | 
   );
 }
 function cards(parent: ParentNode = container) {
-  return [...parent.querySelectorAll(".plugin-card-name")].map(
+  return [...parent.querySelectorAll(".plugin-card-name, .installed-plugin-inventory:not([hidden]) .installed-plugin-name")].filter((item) => !item.closest(".installed-plugin-workspace[style*='display: none']")).map(
     (item) => item.textContent,
   );
 }
@@ -115,11 +115,20 @@ async function click(label: string) {
     (button) =>
       button.textContent === label ||
       button.getAttribute("aria-label") === label ||
+      (button.matches(".plugins-rail-item") && button.firstElementChild?.textContent === label) ||
       (button.getAttribute("role") === "tab" && button.textContent?.startsWith(label)),
   )!;
   expect(button, label).toBeTruthy();
   await act(async () => button.click());
 }
+const categoryButton = () => container.querySelector<HTMLButtonElement>('.installed-plugin-search button[aria-label="Categories"]')!;
+async function selectInstalledCategory(label: string) {
+  await act(async () => categoryButton().click());
+  const options = [...document.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')];
+  await act(async () => options.find((option) => option.textContent === label)!.click());
+  return options.map((option) => option.textContent);
+}
+
 async function search(value: string, label = "Search plugins") {
   const input = container.querySelector<HTMLInputElement>(
     `[aria-label="${label}"]`,
@@ -134,34 +143,18 @@ async function search(value: string, label = "Search plugins") {
 }
 
 describe("plugin catalog browsing", () => {
-  it("groups plugins by the categories they declare, including those a project turns on", async () => {
+  it("lists every installed plugin once, including those a project turns on and the person's own", async () => {
     await renderCatalog();
-    const sections = [...container.querySelectorAll(".plugins-section")];
-    expect(
-      sections.map((section) => section.querySelector("h2")?.textContent),
-    ).toEqual([
-      "Engines & platforms",
-      "Publishing",
-      "Art",
-      "Workflow",
-      "Other",
-    ]);
-    expect(cards(sections[0])).toEqual(["Cocos Creator", "Unity", "Unreal Engine"]);
-    expect(cards(sections[1])).toEqual(["Douyin Mini Games", "WeChat Mini Games"]);
-    expect(cards(sections[2])).toEqual(["Aseprite", "Blender", "Image to Three.js", "Tiled"]);
-    expect(cards(sections[3])).toEqual(["Game Studio", "Three.js World", "Web Game Studio"]);
-    // The person's own are listed with the rest, to switch on and off.
-    expect(cards(sections[4])).toEqual(["Alpha", "New tool", "Zebra"]);
-    // Each says where it is on, and switches that for every project. One
-    // stopped everywhere from its page says so and has no switch.
-    expect(sections[3].textContent).toContain("On in every project");
-    const unreal = [...sections[0].querySelectorAll(".plugin-card")].find((item) => item.textContent?.includes("Unreal Engine"))!;
-    expect(unreal.textContent).toContain("On in chosen projects");
+    expect(cards()).toEqual(store.map((plugin) => plugin.displayName).sort((a, b) => a.localeCompare(b)));
+    expect(container.querySelector(".installed-plugin-filters .ui-filter-chips")?.textContent).toContain("On in every project");
+    const unreal = [...container.querySelectorAll(".installed-plugin-row")].find((item) => item.textContent?.includes("Unreal Engine"))!;
     expect(unreal.textContent).toContain("Disabled");
     expect(unreal.querySelector('[role="switch"]')).toBeNull();
-    expect(sections[0].querySelector('[aria-label="Turn Unity on in every project"]')?.getAttribute("aria-checked")).toBe("false");
+    await renderCatalog("ohmygame/unity");
+    expect(container.querySelector('[aria-label="Turn Unity on in every project"]')?.getAttribute("aria-checked")).toBe("false");
+    await renderCatalog();
 
-    // What the person made is also under Mine, a card each, to edit; one added from this computer isn't.
+    // What the person made is also under Mine, a card each, to edit.
     await click("Mine");
     const mine = container.querySelector('section[aria-label="Your plugins"]')!;
     expect(cards(mine)).toEqual(["Alpha", "Zebra"]);
@@ -169,39 +162,28 @@ describe("plugin catalog browsing", () => {
     expect(container.querySelector(".plugins-create")?.textContent).toContain("Create a plugin with AI");
   });
 
-  it("narrows to one category, offering only those something is in, under each category a plugin names", async () => {
+  it("shows plugins under each of their categories and preserves the selected category when switching tabs", async () => {
     store.find((plugin) => plugin.id === "ohmygame/douyin-minigame")!.categories = ["engine", "publishing"];
     await renderCatalog();
-    const chips = () => [...container.querySelectorAll<HTMLButtonElement>(".ui-filter-chip")];
-    // Only categories something here is in, without counts.
-    expect(chips().map((chip) => chip.textContent)).toEqual(["All", "Engines & platforms", "Publishing", "Art", "Workflow", "Other"]);
-    await click("Engines & platforms");
+    expect(cards().filter(name => name === "Douyin Mini Games")).toHaveLength(1);
+    expect(await selectInstalledCategory("Engines & platforms")).toEqual([
+      "Engines & platforms", "Art", "Workflow", "Publishing", "Other",
+    ]);
     expect(cards()).toEqual(["Cocos Creator", "Douyin Mini Games", "Unity", "Unreal Engine"]);
-    expect(container.querySelectorAll(".plugins-section h2")).toHaveLength(0);
-    await click("Publishing");
+    await selectInstalledCategory("Publishing");
     expect(cards()).toEqual(["Douyin Mini Games", "WeChat Mini Games"]);
-    // Picking it again shows everything.
-    await click("Publishing");
-    expect(cards()).toContain("New tool");
-    await click("Other");
+    await click("Mine");
+    await click("Installed");
+    expect(categoryButton().textContent).toContain("Publishing");
+    expect(cards()).toEqual(["Douyin Mini Games", "WeChat Mini Games"]);
+    await selectInstalledCategory("Other");
     expect(cards()).toEqual(["Alpha", "New tool", "Zebra"]);
   });
 
-  it("expands and collapses an individual group", async () => {
-    store.push(...["one", "two", "three", "four", "five", "six"].map((name) => storePlugin(`extra-${name}`, `Extra ${name}`)));
-    await renderCatalog();
-    const other = () => [...container.querySelectorAll(".plugins-section")].find((section) => section.querySelector("h2")?.textContent?.startsWith("Other"))!;
-    expect(cards(other())).toHaveLength(6);
-    await click("View all (9)");
-    expect(cards(other())).toHaveLength(9);
-    await click("Show less");
-    expect(cards(other())).toHaveLength(6);
-    expect(cards()).toContain("Tiled");
-  });
-
-  it("keeps cards in place when switched for every project", async () => {
+  it("keeps rows in place when switched for every project", async () => {
     await renderCatalog();
     const before = cards();
+    await renderCatalog(store.find((plugin) => plugin.displayName === "Blender")!.id);
     const blender = () => container.querySelector('[aria-label="Turn Blender on in every project"]');
     await click("Turn Blender on in every project");
     expect(cards()).toEqual(before);
@@ -211,17 +193,22 @@ describe("plugin catalog browsing", () => {
     expect(blender()?.getAttribute("aria-checked")).toBe("true");
   });
 
-  it("searches every plugin without group expansion", async () => {
+  it("searches installed plugins by description, name, keywords, agents, and skills", async () => {
     await renderCatalog();
     await search("Mini Games");
     expect(cards()).toEqual(["Douyin Mini Games", "WeChat Mini Games"]);
-    expect(container.querySelectorAll(".plugins-section h2")).toHaveLength(0);
-    expect(container.textContent).not.toContain("View all");
     await search("a");
     expect(cards()).toContain("Alpha");
     await click("Mine");
     expect(cards()).toContain("Alpha");
     await click("Installed");
+    // Keywords and what a plugin adds by name are searched too.
+    await search("sculpt");
+    expect(cards()).toEqual(["Blender"]);
+    await search("unreal agent");
+    expect(cards()).toEqual(["Unreal Engine"]);
+    await search("publish-wechat");
+    expect(cards()).toEqual(["Alpha"]);
     await search("missing tool");
     expect(cards()).toEqual([]);
     expect(container.textContent).toContain("No matching plugins");
@@ -244,7 +231,7 @@ describe("plugin catalog browsing", () => {
       ...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
     ];
     expect(items.map((item) => item.textContent)).toEqual(
-      expect.arrayContaining(["Create with AI…", "Add plugin…"]),
+      expect.arrayContaining(["Create with AI", "Add plugin"]),
     );
     // The market is a tab, so the menu doesn't offer it again.
     expect(items.map((item) => item.textContent)).not.toContain("Browse plugins");
@@ -315,7 +302,7 @@ describe("plugin catalog browsing", () => {
       const letter = card("Market popular").querySelector<HTMLElement>(".plugin-monogram")!;
       expect(letter.textContent).toBe("M");
       expect(letter.style.getPropertyValue("--monogram-hue")).toMatch(/^var\(--hue-[a-z]+\)$/);
-      expect(card("Market official").textContent).toContain("OhMyGame");
+      expect(card("Market official").querySelector(".plugin-card-author")?.textContent).toBe("@ohmygame");
       // With one, its own icon, read from the package file mirror; a publisher's avatar is only in the dialog.
       await vi.waitFor(() => expect(card("Market avatar").querySelector(".plugin-tile img")).toBeTruthy());
       expect(card("Market official").querySelector(".plugin-tile img")).toBeNull();
@@ -338,6 +325,55 @@ describe("plugin catalog browsing", () => {
       await search("popular");
       expect(cards()).toEqual(["Market popular"]);
       expect(section("All plugins").querySelector("h2")?.textContent).toBe("All plugins1");
+    });
+
+    it("finds a plugin by its keywords and what it adds, and searches for a keyword from its dialog", async () => {
+      market = { status: "ready", blocked: [], plugins: [
+        listed("agents", { categories: ["agent"], names: ["Gemini CLI"] }),
+        listed("flow", { categories: ["provider"], keywords: ["aggregator", "LLM"] }),
+        listed("router", { categories: ["provider"], keywords: ["aggregator"] }),
+        listed("pixels", { categories: ["art"] }),
+      ] };
+      await renderCatalog(undefined, "discover");
+      await search("gemini");
+      expect(cards()).toEqual(["Market agents"]);
+      await search("llm");
+      expect(cards()).toEqual(["Market flow"]);
+      await search("");
+      // Opened from one category, a keyword searches them all.
+      await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".plugins-rail-item")].find((item) => item.textContent?.startsWith("Art"))!.click());
+      await act(async () => container.querySelector<HTMLButtonElement>(".plugin-card-link")!.click());
+      expect(dialog()?.querySelector(".plugin-keywords")).toBeNull();
+      await act(async () => dialog()!.querySelector<HTMLButtonElement>(".ui-dialog-close")!.click());
+      await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".plugins-rail-item")].find((item) => item.textContent?.startsWith("Model providers"))!.click());
+      await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".plugin-card-link")].find((item) => item.textContent?.includes("Market flow"))!.click());
+      expect([...dialog()!.querySelectorAll(".plugin-keyword")].map((item) => item.textContent)).toEqual(["aggregator", "LLM"]);
+      await act(async () => dialog()!.querySelector<HTMLButtonElement>(".plugin-keyword")!.click());
+      expect(dialog()).toBeNull();
+      expect(container.querySelector<HTMLInputElement>('[aria-label="Search plugins"]')?.value).toBe("aggregator");
+      expect(cards()).toEqual(["Market flow", "Market router"]);
+    });
+
+    it("narrows model providers by what they make, which their cards show", async () => {
+      market = { status: "ready", blocked: [], plugins: [
+        listed("chat", { categories: ["provider"], providerKinds: ["language"] }),
+        listed("studio", { categories: ["provider"], providerKinds: ["language", "image", "video"] }),
+        listed("frames", { categories: ["provider"], providerKinds: ["video"] }),
+        listed("pixels", { categories: ["art"] }),
+      ] };
+      await renderCatalog(undefined, "discover");
+      const kinds = () => container.querySelector('[aria-label="What it makes"][role="group"]');
+      const card = (name: string) => [...container.querySelectorAll(".plugin-card")].find((item) => item.textContent?.includes(name))!;
+      await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".plugins-rail-item")].find((item) => item.textContent?.startsWith("Art"))!.click());
+      expect(kinds()).toBeNull();
+      await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".plugins-rail-item")].find((item) => item.textContent?.startsWith("Model providers"))!.click());
+      expect([...kinds()!.querySelectorAll("button")].map((item) => item.textContent)).toEqual(["All", "Language", "Image", "Video"]);
+      expect([...card("Market studio").querySelectorAll(".plugin-card-kind")].map((item) => item.textContent)).toEqual(["Language", "Image", "Video"]);
+      await act(async () => [...kinds()!.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent === "Video")!.click());
+      expect(cards().sort()).toEqual(["Market frames", "Market studio"]);
+      // Picked again, it shows them all.
+      await act(async () => [...kinds()!.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent === "Video")!.click());
+      expect(cards()).toHaveLength(3);
     });
 
     it("reviews a listed plugin from Get in its dialog, which a link opens too", async () => {
@@ -441,16 +477,15 @@ describe("plugin catalog browsing", () => {
       store.push(fromNpm("owned"), personal("local", "Installed local", { id: "acme/local" }), other);
       market = { status: "ready", blocked: [], plugins: [listed("owned", { version: "1.2.0" }), listed("local", { version: "1.2.0" }), listed("other", { version: "1.2.0" })] };
       await renderCatalog();
-      const card = (name: string) => [...container.querySelectorAll(".plugin-card")].find((item) => item.textContent?.includes(name))!;
-      expect(card("Installed owned").textContent).toContain("Update available");
-      // Another registry is a source of its own, so npm's package couldn't join it.
-      expect(card("Installed other").textContent).not.toContain("Update available");
-      // They're listed first, and the tab says so too, with a dot rather than a count.
-      expect(cards(section("Updates"))).toEqual(["Installed owned"]);
+      const update = (name: string) => container.querySelector(`.installed-plugin-list button[aria-label="Update ${name}"]`);
+      expect(update("Installed owned")).not.toBeNull();
+      // Another registry and a local source aren't eligible for the market update.
+      expect(update("Installed other")).toBeNull();
+      expect(update("Installed local")).toBeNull();
+      await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".ui-filter-chip")].find((item) => item.firstChild?.textContent === "Updates")!.click());
+      expect(cards()).toEqual(["Installed owned"]);
       const installedTab = [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent?.startsWith("Installed"))!;
       expect(installedTab.querySelector(".ui-tab-dot")?.textContent).toBe("Updates available");
-      // One added from this computer is the person's own, and never updates from the market.
-      expect(card("Installed local").textContent).not.toContain("Update available");
       await renderCatalog("acme/owned");
       await click("Update to 1.2.0");
       expect(document.querySelector(".ui-dialog")).toBeTruthy();
@@ -460,7 +495,7 @@ describe("plugin catalog browsing", () => {
       store.push(fromNpm("owned"));
       market = { status: "ready", plugins: [], blocked: [{ package: "@acme/owned", version: "1.0.0", reason: "steals keys" }] };
       await renderCatalog();
-      const card = [...container.querySelectorAll(".plugin-card")].find((item) => item.textContent?.includes("Installed owned"))!;
+      const card = [...container.querySelectorAll(".installed-plugin-row")].find((item) => item.textContent?.includes("Installed owned"))!;
       expect(card.textContent).toContain("Blocked");
       expect(store.at(-1)!.grants?.enabled).toBe(true);
       await renderCatalog("acme/owned");
@@ -518,33 +553,10 @@ describe("plugin catalog browsing", () => {
     expect(shown).toEqual(["installed"]);
   });
 
-  it("filters installed plugins by what they add, Skills included", async () => {
+  it("finds a newly added plugin by its skill name", async () => {
     await renderCatalog();
-    // One filter, offering only what some installed plugin adds.
-    const contains = container.querySelector<HTMLButtonElement>('[aria-label="Contains"]')!;
-    await act(async () => contains.click());
-    expect([...document.querySelectorAll('[role="option"]')].map((option) => option.textContent))
-      .toEqual(["Anything", "Skills", "MCP"]);
-    await act(async () => contains.click());
-    await pick("Contains", "MCP");
-    expect(cards()).toEqual(["Unreal Engine", "New tool"]);
-
-    // Skills shows each Skill on its own, and they go on and off with their plugin.
-    await pick("Contains", "Skills");
-    await vi.waitFor(() => expect(container.textContent).toContain("plan-game"));
-    expect(container.textContent).toContain("design-game");
-    // The person's own plugins' Skills too.
-    expect(container.textContent).toContain("stripes");
-    expect(container.querySelector('[aria-label="Disable design-game"]')).toBeNull();
-    await search("plan");
-    expect(container.textContent).toContain("plan-game");
-    expect(container.textContent).not.toContain("design-game");
-  });
-
-  it("shows a plugin's skills after adding it", async () => {
-    await renderCatalog();
-    await pick("Contains", "Skills");
-    await vi.waitFor(() => expect(container.textContent).toContain("plan-game"));
+    await search("fresh-skill");
+    expect(cards()).toEqual([]);
     await click("Add");
     await act(async () =>
       [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
@@ -560,7 +572,7 @@ describe("plugin catalog browsing", () => {
     await act(async () => url.form!.requestSubmit());
     await vi.waitFor(() => expect(document.querySelector(".ui-dialog-title")?.textContent).toBe("Add Fresh?"));
     await act(async () => document.querySelector<HTMLFormElement>("#plugin-add-form")!.requestSubmit());
-    await vi.waitFor(() => expect(container.textContent).toContain("fresh-skill"));
+    await vi.waitFor(() => expect(cards()).toEqual(["Fresh"]));
   });
 });
 
@@ -574,3 +586,10 @@ async function pick(label: string, option: string) {
       .click(),
   );
 }
+
+describe("plugin types a plugin works with", () => {
+  it("names a type the app had as its own by that name, once, and another plugin's by its own id", async () => {
+    const { appliesToLabels } = await import("../src/renderer/plugin-catalog.js");
+    expect(appliesToLabels(["general", "ohmygame/godot:godot-game", "godot-game", "acme/engine:level", "beta/maps:level"])).toEqual(["General Game", "Godot", "level", "level"]);
+  });
+});

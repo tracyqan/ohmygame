@@ -1,10 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { PROJECT_TYPE_IDS, type ProjectType } from "../shared/contracts.js";
 import { OHMYGAME_PUBLISHER, PLUGIN_CATEGORIES, type PluginCategory } from "../shared/plugin-manifest.js";
-import type { MarketPlugin } from "../shared/plugins.js";
+import { PROVIDER_KINDS, type MarketPlugin } from "../shared/plugins.js";
+import { PLUGIN_PROJECT_KINDS } from "../shared/project-runtime.js";
+import type { ProviderCapability } from "../shared/contracts.js";
 import { readPluginMarketAvatar, readPluginMarketImage } from "./api.js";
 import { language, t } from "./i18n.js";
-import { Check, Download, ExternalLink } from "./icons.js";
+import { Check, CircleHelp, Download, ExternalLink, SlidersHorizontal } from "./icons.js";
 import { PluginMonogram } from "./plugin-icons.js";
 import { formatBytes } from "./format-bytes.js";
 import { PluginMarks } from "./plugin-marks.js";
@@ -12,12 +14,11 @@ import { PluginCapabilityList } from "./plugin-consent-dialog.js";
 import { PluginAddsList, type PluginAddRow } from "./plugin-summary.js";
 import { projectTypeLabel } from "./project-types.js";
 import { useReadyRuntimeGeneration } from "./runtime-connection.js";
-import { Button, Dialog, FilterChips, Select } from "./ui/index.js";
+import { Button, Chip, Dialog, FilterChips, IconButton, Select, Tooltip } from "./ui/index.js";
 
 // What the Plugins page browses by: the categories plugins name, how the
 // market is sorted, and the market's cards and pages. A plugin may name up to
-// three categories; it shows under each when one is picked, and under its
-// first in the sections of the unfiltered page.
+// three categories and shows under each when one is picked.
 
 /** A plugin's categories that this app knows, and `other` for one that names none of them. */
 export type CatalogCategory = PluginCategory | "other";
@@ -27,11 +28,6 @@ export type CatalogFilter = CatalogCategory | "all";
 const known = (categories: readonly string[] | undefined) =>
   (categories ?? []).filter((category): category is PluginCategory => (PLUGIN_CATEGORIES as readonly string[]).includes(category));
 
-/** The section a plugin is listed in. */
-export function catalogSection(categories: readonly string[] | undefined): CatalogCategory {
-  return known(categories)[0] ?? "other";
-}
-
 export function inCatalogCategory(categories: readonly string[] | undefined, filter: CatalogFilter): boolean {
   if (filter === "all") return true;
   const named = known(categories);
@@ -40,19 +36,36 @@ export function inCatalogCategory(categories: readonly string[] | undefined, fil
 
 export const categoryLabel = (category: CatalogCategory) => t(`pluginCatalog.categories.${category}`);
 
-/** The categories to pick from: those some plugin here is in, with how many, and the one picked even when none are. */
-export function CategoryChips({ items, value, onChange }: {
-  items: readonly (readonly string[] | undefined)[];
-  value: CatalogFilter;
-  onChange: (value: CatalogFilter) => void;
+/** What search reads of a market plugin: its name, description, ids, keywords and what it adds by name. */
+export function marketSearchText(plugin: MarketPlugin): string {
+  return [plugin.displayName, plugin.description, plugin.id, plugin.package, ...(plugin.keywords ?? []), ...(plugin.names ?? [])].join(" ").toLowerCase();
+}
+
+/** A plugin's keywords; each searches for itself when the page can search. */
+export function PluginKeywords({ keywords, onSearch }: { keywords: readonly string[]; onSearch?: ((keyword: string) => void) | undefined }): ReactNode {
+  return <span className="plugin-keywords">
+    {keywords.map((keyword) => onSearch
+      ? <button key={keyword} type="button" className="ui-chip ui-chip-outline plugin-keyword" title={t("pluginCatalog.searchKeyword", { keyword })}
+        onClick={() => onSearch(keyword)}><span className="ui-chip-label">{keyword}</span></button>
+      : <Chip key={keyword} outline>{keyword}</Chip>)}
+  </span>;
+}
+
+export type ProviderKindFilter = ProviderCapability | "all";
+
+export const inProviderKind = (plugin: MarketPlugin, kind: ProviderKindFilter) => kind === "all" || Boolean(plugin.providerKinds?.includes(kind));
+
+/** Under Model providers: what the providers here make, to narrow them by; none when there's nothing to pick between. */
+export function ProviderKindChips({ plugins, value, onChange }: {
+  plugins: readonly MarketPlugin[];
+  value: ProviderKindFilter;
+  onChange: (value: ProviderKindFilter) => void;
 }): ReactNode {
-  // Only categories something here is in, so no chip leads to an empty list; no counts, as on the tabs.
-  const options = CATALOG_CATEGORIES.filter((category) => category === value || items.some((categories) => inCatalogCategory(categories, category)))
-    .map((category) => ({ value: category as CatalogFilter, label: categoryLabel(category) }));
-  return <FilterChips<CatalogFilter> label={t("pluginCatalog.categoriesLabel")}
-    options={[{ value: "all", label: t("pluginCatalog.all") }, ...options]}
+  const kinds = PROVIDER_KINDS.filter((kind) => kind === value || plugins.some((plugin) => plugin.providerKinds?.includes(kind)));
+  if (!kinds.length || kinds.length === 1 && value === "all" && plugins.every((plugin) => plugin.providerKinds?.includes(kinds[0]!))) return null;
+  return <FilterChips<ProviderKindFilter> label={t("pluginCatalog.providerKindsLabel")}
+    options={[{ value: "all", label: t("pluginCatalog.all") }, ...kinds.map((kind) => ({ value: kind as ProviderKindFilter, label: t(`capability.${kind}`) }))]}
     value={[value]}
-    // A chip turns the others off; turning the picked one off shows everything again.
     onChange={(next) => onChange(next.find((item) => item !== value) ?? "all")} />;
 }
 
@@ -113,8 +126,8 @@ export function MarketSortSelect({ value, onChange }: { value: MarketSort; onCha
 /** Published by OhMyGame: npm lets only its members publish to the scope. */
 export const isOfficialPlugin = (id: string) => id.startsWith(`${OHMYGAME_PUBLISHER}/`);
 
-function publisherName(plugin: MarketPlugin): string {
-  return isOfficialPlugin(plugin.id) ? t("plugins.officialSource") : `@${plugin.id.slice(0, plugin.id.indexOf("/"))}`;
+export function pluginPublisherName(id: string): string {
+  return `@${id.split("/")[0]}`;
 }
 
 /**
@@ -122,16 +135,16 @@ function publisherName(plugin: MarketPlugin): string {
  * through the daemon from beside the index, as addresses an `img` can show:
  * undefined while reading, null for one that can't be read.
  */
-function useMarketImages(role: "icon" | "screenshot", paths: readonly (string | undefined)[]): (string | null | undefined)[] {
+function useMarketImages(role: "icon" | "screenshot", source: string | undefined, paths: readonly (string | undefined)[]): (string | null | undefined)[] {
   const generation = useReadyRuntimeGeneration();
   const [urls, setUrls] = useState<(string | null | undefined)[]>([]);
-  const key = [role, ...paths].join("\n");
+  const key = [role, source ?? "", ...paths].join("\n");
   useEffect(() => {
     setUrls([]);
     const controller = new AbortController();
     const made: string[] = [];
     void Promise.all(paths.map((path) => path
-      ? readPluginMarketImage(path, role, controller.signal).then((blob) => {
+      ? readPluginMarketImage(path, role, source, controller.signal).then((blob) => {
         const url = URL.createObjectURL(blob);
         made.push(url);
         return url;
@@ -190,7 +203,7 @@ function useMarketAvatar(id: string | undefined): string | null | undefined {
 
 /** A market plugin's own icon, as an installed one's tile shows it, or its first letter. */
 function MarketTile({ plugin, large = false }: { plugin: MarketPlugin; large?: boolean }): ReactNode {
-  const [icon] = useMarketImages("icon", [plugin.icon]);
+  const [icon] = useMarketImages("icon", plugin.source, [plugin.icon]);
   const size = large ? 40 : 24;
   return <span className={`plugin-tile${large ? " plugin-tile-large" : ""}`}>
     {icon ? <img className="plugin-icon-image" src={icon} width={size} height={size} alt="" aria-hidden="true" />
@@ -204,7 +217,7 @@ function Publisher({ plugin }: { plugin: MarketPlugin }): ReactNode {
   const avatar = useMarketAvatar(plugin.avatar);
   return <span className="plugin-publisher">
     {avatar ? <img src={avatar} alt="" aria-hidden="true" /> : null}
-    {publisherName(plugin)}
+    {pluginPublisherName(plugin.id)}
   </span>;
 }
 
@@ -232,8 +245,11 @@ export function MarketPluginCard({ plugin, installed = false, onOpen }: {
           <MarketBadges plugin={plugin} installed={installed} />
         </strong>
         <small>{plugin.description}</small>
+        {plugin.providerKinds?.length ? <span className="plugin-card-kinds" aria-label={t("pluginCatalog.providerKindsLabel")}>
+          {plugin.providerKinds.map((kind) => <span key={kind} className="plugin-card-kind">{t(`capability.${kind}`)}</span>)}
+        </span> : null}
         <span className="plugins-meta plugin-card-foot">
-          <span className="plugin-card-author">{publisherName(plugin)}</span>
+          <span className="plugin-card-author">{pluginPublisherName(plugin.id)}</span>
           <span className="plugin-card-numbers">
             <span className="plugin-card-version">v{plugin.version}</span>
             {plugin.weeklyDownloads ? <Stat icon={<Download size={12} />} text={compact.format(plugin.weeklyDownloads)}
@@ -263,13 +279,16 @@ export type MarketOnly = "official" | "verified";
 export const marketOnly = (plugin: MarketPlugin, only: readonly MarketOnly[]) =>
   (!only.includes("official") || isOfficialPlugin(plugin.id)) && (!only.includes("verified") || plugin.sourceVerified);
 
-export function MarketRail({ plugins, section, onSection, only, onOnly }: {
+export function MarketRail({ plugins, section, onSection, only, onOnly, settingsDisabled, onSettings }: {
   /** What the search and filters leave, to count. */
   plugins: readonly MarketPlugin[];
   section: MarketSection;
   onSection: (section: MarketSection) => void;
   only: readonly MarketOnly[];
   onOnly: (only: MarketOnly[]) => void;
+  settingsDisabled?: boolean;
+  /** Opens where the market is listed from, from the foot of the list. */
+  onSettings: () => void;
 }): ReactNode {
   const counts = new Map(CATALOG_CATEGORIES.map((category) => [category, plugins.filter((plugin) => inCatalogCategory(plugin.categories, category)).length]));
   const item = (value: MarketSection, label: string, count?: number) =>
@@ -293,6 +312,12 @@ export function MarketRail({ plugins, section, onSection, only, onOnly }: {
     <h3>{t("pluginCatalog.showOnly")}</h3>
     {filter("official", t("plugins.official"))}
     {filter("verified", t("plugins.sourceVerified"))}
+    <div className="plugins-rail-foot">
+      <IconButton size="sm" label={t("pluginMarketSettings.open")} disabled={settingsDisabled} onClick={onSettings}><SlidersHorizontal size={14} /></IconButton>
+      <Tooltip content={t("pluginMarketSettings.updates")} placement="top-start">
+        <button type="button" className="plugins-rail-help" aria-label={t("pluginMarketSettings.updates")}><CircleHelp size={14} /></button>
+      </Tooltip>
+    </div>
   </nav>;
 }
 
@@ -317,9 +342,16 @@ export function PluginScreenshots({ shots }: { shots: readonly { src: string; ca
   </section>;
 }
 
-/** The project types a plugin names that this app has, by their names here. */
+/**
+ * The project types a plugin names, by their names here, each once. A plugin's
+ * type that the app had as its own (Godot) goes by that name; another
+ * plugin's type by its id after the plugin's.
+ */
 export function appliesToLabels(appliesTo: readonly string[] | undefined): string[] {
-  return (appliesTo ?? []).map((type) => (PROJECT_TYPE_IDS as readonly string[]).includes(type) ? projectTypeLabel(type as ProjectType) : type);
+  const kinds: Record<string, string> = PLUGIN_PROJECT_KINDS;
+  // Types are told apart by id, so two plugins' `level` types stay two; the app's own name for one appears once.
+  const types = new Set((appliesTo ?? []).map((type) => Object.keys(kinds).find((kind) => kinds[kind] === type) ?? type));
+  return [...types].map((app) => (PROJECT_TYPE_IDS as readonly string[]).includes(app) ? projectTypeLabel(app as ProjectType) : app.slice(app.indexOf(":") + 1));
 }
 
 /** What a market plugin adds, by how many of each; kinds this app doesn't know are left out. */
@@ -349,13 +381,16 @@ function marketAddRows(adds: Record<string, number>): PluginAddRow[] {
  * its numbers in one row, as an app store shows them, its screenshots and
  * description, what it adds and asks for, and where it comes from.
  */
-export function MarketPluginDialog({ plugin, installed, onClose, onGet, onManage }: {
+export function MarketPluginDialog({ plugin, installed, getDisabled, onClose, onGet, onManage, onSearch }: {
   plugin: MarketPlugin;
   installed: boolean;
   onClose: () => void;
+  getDisabled?: boolean;
   onGet: () => void;
   /** Opens the installed plugin's own page. */
   onManage: () => void;
+  /** Searches the market for one of its keywords. */
+  onSearch?: (keyword: string) => void;
 }): ReactNode {
   const compact = new Intl.NumberFormat(language, { notation: "compact" });
   const rows = marketAddRows(plugin.adds);
@@ -367,7 +402,7 @@ export function MarketPluginDialog({ plugin, installed, onClose, onGet, onManage
   };
   const updated = date(plugin.publishedAt);
   const created = date(plugin.createdAt);
-  const shots = useMarketImages("screenshot", (plugin.screenshots ?? []).map((shot) => shot.path));
+  const shots = useMarketImages("screenshot", plugin.source, (plugin.screenshots ?? []).map((shot) => shot.path));
   const stats = [
     plugin.weeklyDownloads !== undefined ? { label: t("pluginCatalog.weekly"), value: compact.format(plugin.weeklyDownloads) } : undefined,
     plugin.stars !== undefined ? { label: t("pluginCatalog.starsShort"), value: compact.format(plugin.stars) } : undefined,
@@ -385,7 +420,7 @@ export function MarketPluginDialog({ plugin, installed, onClose, onGet, onManage
           <Publisher plugin={plugin} />
         </div>
         {installed ? <Button onClick={onManage}>{t("pluginCatalog.manage")}</Button>
-          : <Button variant="primary" onClick={onGet}>{t("pluginCatalog.get")}</Button>}
+          : <Button variant="primary" disabled={getDisabled} onClick={onGet}>{t("pluginCatalog.get")}</Button>}
       </div>
       <dl className="plugin-dialog-stats">
         {stats.map((stat) => <div key={stat.label}><dt>{stat.label}</dt><dd>{stat.value}</dd></div>)}
@@ -411,9 +446,11 @@ export function MarketPluginDialog({ plugin, installed, onClose, onGet, onManage
         <dl className="plugin-props plugin-dialog-props">
           <dt>{t("pluginCatalog.categoriesLabel")}</dt>
           <dd>{categories.length ? categories.map(categoryLabel).join(" · ") : categoryLabel("other")}</dd>
+          {plugin.keywords?.length ? <><dt>{t("pluginCatalog.keywords")}</dt><dd><PluginKeywords keywords={plugin.keywords} onSearch={onSearch} /></dd></> : null}
           <dt>{t("pluginCatalog.worksWith")}</dt>
           <dd>{worksWith.length ? worksWith.join(" · ") : t("pluginCatalog.everyType")}</dd>
           {created ? <><dt>{t("pluginCatalog.firstPublished")}</dt><dd>{created}</dd></> : null}
+          {plugin.source ? <><dt>{t("pluginMarketSettings.listedBy")}</dt><dd>{new URL(plugin.source).host}</dd></> : null}
           <dt>{t("pluginStore.npmPackage")}</dt>
           <dd><a href={`https://www.npmjs.com/package/${plugin.package}`} target="_blank" rel="noreferrer">{plugin.package}<ExternalLink size={11} /></a></dd>
           {plugin.repository ? <><dt>{t("plugins.repository")}</dt><dd>

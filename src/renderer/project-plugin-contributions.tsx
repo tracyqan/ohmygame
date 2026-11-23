@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { createContext, useContext, useEffect, useState, useSyncExternalStore } from "react";
 import type { ProjectState } from "../shared/contracts.js";
 import { matchesWhen, type WhenContext } from "../shared/plugin-when.js";
 import type { ProjectInputMap, ProjectPluginChange, ProjectPluginCommand, ProjectPluginPreview, ProjectPreviewDevice, ProjectPreviewFilter } from "../shared/plugins.js";
@@ -9,6 +9,7 @@ import { LoaderCircle, MoreHorizontal } from "./icons.js";
 import { useReadyRuntimeGeneration } from "./runtime-connection.js";
 import { Alert, Button, DropdownMenu, Empty, IconButton, Skeleton } from "./ui/index.js";
 import type { PanelId } from "./workspace-layout.js";
+import "./plugin-frame.css";
 
 // What a project's plugins add to its workspace: panels beside the
 // built-in ones, commands in the slots their manifests name, and preview
@@ -18,10 +19,11 @@ import type { PanelId } from "./workspace-layout.js";
 export const pluginPanelId = (panel: Pick<PluginPanel, "plugin" | "id">): PanelId => `plugin:${panel.plugin}:${panel.id}`;
 
 /** What `when` sees in a project; names nothing here knows stay undefined. */
-export function projectWhenContext(project: Pick<ProjectState, "type" | "pluginType">, plugins: Iterable<string>): WhenContext {
+export function projectWhenContext(project: Pick<ProjectState, "type" | "pluginType"> & { preview?: Pick<ProjectState["preview"], "status"> }, plugins: Iterable<string>): WhenContext {
   return {
     values: {
       "project.type": project.pluginType?.id ?? project.type,
+      ...(project.preview?.status ? { "preview.status": project.preview.status } : {}),
       platform: typeof window === "undefined" ? undefined : window.ohMyGameDesktop?.platform ?? "web",
     },
     plugins: new Set(plugins),
@@ -53,6 +55,49 @@ export function commandsForSlot(commands: readonly ProjectPluginCommand[], slot:
   return commands.filter((command) => command.slots.some((entry) => entry.slot === slot && matchesWhen(entry.when, context)));
 }
 
+/**
+ * What a command run from somewhere in a project is about, such as a canvas
+ * node. A prompt needs none: the composer already sends the canvas selection.
+ */
+export interface PluginCommandTarget {
+  /** Passed to a native command that declares `run.input`; others run as from a menu. */
+  input?: unknown;
+}
+
+/**
+ * The project's plugin commands and how to run one, for the views deep in the
+ * workspace (the game's toolbar, the canvas) that show a slot of their own.
+ * Outside a project, there are none.
+ */
+export interface PluginSlots {
+  commands: readonly ProjectPluginCommand[];
+  when: WhenContext;
+  run: (command: ProjectPluginCommand, target?: PluginCommandTarget) => Promise<unknown>;
+  /** Plugins the folder's files turned on here that wait to be allowed, such as an engine's. */
+  waiting?: readonly WaitingPlugin[];
+  /** Allows one of `waiting` in this project. */
+  allow?: (id: string) => Promise<void>;
+}
+
+/** A plugin the folder's files turned on that waits to be allowed. */
+export interface WaitingPlugin {
+  id: string;
+  displayName: string;
+}
+
+export const PluginSlotsContext = createContext<PluginSlots | undefined>(undefined);
+
+/** A slot's commands in this project, and how to run one; with the plugins that wait to be allowed, which may add some. */
+export function usePluginSlot(slot: string): { commands: ProjectPluginCommand[]; run: PluginSlots["run"]; waiting: readonly WaitingPlugin[]; allow: (id: string) => Promise<void> } {
+  const slots = useContext(PluginSlotsContext);
+  return {
+    commands: slots ? commandsForSlot(slots.commands, slot, slots.when) : [],
+    run: slots?.run ?? (async () => undefined),
+    waiting: slots?.waiting ?? [],
+    allow: slots?.allow ?? (async () => undefined),
+  };
+}
+
 /** The "/" list: commands with a `slash` name, and those in the `composer.slash` slot. */
 export function slashCommands(commands: readonly ProjectPluginCommand[], context: WhenContext): ProjectPluginCommand[] {
   const slotted = new Set(commandsForSlot(commands, "composer.slash", context));
@@ -74,16 +119,17 @@ export function useProjectPluginsRevision(): number {
  * `filesRevision` reads only the panels again: a project's own panels are
  * files in it, which the agent can add, change or remove in any turn.
  */
-export function useProjectPluginContributions(project: Pick<ProjectState, "id" | "type" | "pluginType"> | undefined, revision: number, filesRevision = 0): {
+export function useProjectPluginContributions(project: Pick<ProjectState, "id" | "type" | "pluginType"> & { preview?: Pick<ProjectState["preview"], "status"> } | undefined, revision: number, filesRevision = 0): {
   panels: PluginPanel[];
   commands: ProjectPluginCommand[];
   previewDevices: ProjectPreviewDevice[];
   previewFilters: ProjectPreviewFilter[];
   inputMaps: ProjectInputMap[];
   when: WhenContext;
+  waiting: WaitingPlugin[];
 } {
   const generation = useReadyRuntimeGeneration();
-  const [loaded, setLoaded] = useState<{ projectId: string; commands: ProjectPluginCommand[]; preview: ProjectPluginPreview; active: string[] }>();
+  const [loaded, setLoaded] = useState<{ projectId: string; commands: ProjectPluginCommand[]; preview: ProjectPluginPreview; active: string[]; waiting: WaitingPlugin[] }>();
   const [panels, setPanels] = useState<{ projectId: string; panels: PluginPanel[] }>();
   const projectId = project?.id;
   useEffect(() => {
@@ -102,15 +148,17 @@ export function useProjectPluginContributions(project: Pick<ProjectState, "id" |
       listProjectPluginCommands(projectId).catch((): ProjectPluginCommand[] => []),
       getProjectPluginPreview(projectId).catch((): ProjectPluginPreview => ({ devices: [], filters: [], inputMaps: [] })),
       // `project.plugin('<id>')` asks about every active plugin, with or without panels.
-      getProjectPlugins(projectId)
-        .then((view) => view.plugins.flatMap((plugin) => plugin.status === "active" ? [plugin.id] : []))
-        .catch((): string[] => []),
-    ]).then(([commands, preview, active]) => {
-      if (!disposed) setLoaded({ projectId, commands, preview, active });
+      getProjectPlugins(projectId).then((view) => Array.isArray(view?.plugins) ? view.plugins : []).catch(() => []),
+    ]).then(([commands, preview, plugins]) => {
+      const active = plugins.flatMap((plugin) => plugin.status === "active" ? [plugin.id] : []);
+      // Only one that would start the game, as an engine's does, is offered in the Game panel.
+      const waiting = plugins.flatMap((plugin) => plugin.detected && plugin.startsGame && (plugin.status === "needs-consent" || plugin.status === "needs-approval")
+        ? [{ id: plugin.id, displayName: plugin.displayName }] : []);
+      if (!disposed) setLoaded({ projectId, commands, preview, active, waiting });
     });
     return () => { disposed = true; };
   }, [projectId, revision, generation]);
-  if (!project || loaded?.projectId !== project.id || panels?.projectId !== project.id) return { panels: [], commands: [], previewDevices: [], previewFilters: [], inputMaps: [], when: { values: {}, plugins: new Set() } };
+  if (!project || loaded?.projectId !== project.id || panels?.projectId !== project.id) return { panels: [], commands: [], previewDevices: [], previewFilters: [], inputMaps: [], when: { values: {}, plugins: new Set() }, waiting: [] };
   const when = projectWhenContext(project, [...loaded.active, ...[...panels.panels, ...loaded.commands].map((item) => item.plugin)]);
   return {
     // A page needs its address; one without it can't be shown, except a
@@ -121,6 +169,7 @@ export function useProjectPluginContributions(project: Pick<ProjectState, "id" |
     previewFilters: loaded.preview.filters,
     inputMaps: loaded.preview.inputMaps,
     when,
+    waiting: loaded.waiting,
   };
 }
 

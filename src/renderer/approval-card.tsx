@@ -30,8 +30,12 @@ export function ApprovalCard({
   }, [request.requestId]);
   const details = request.request;
   const agent = agentName ?? t("approval.theAgent");
-  const title =
-    details.kind === "command"
+  const library = details.libraryAdd;
+  const title = details.pluginAccess
+    ? t("pluginAccess.approveTitle", { label: details.pluginAccess.label })
+    : library
+      ? t("approval.libraryAddTitle", { name: library.name, source: library.source })
+      : details.kind === "command"
       ? t("approval.commandTitle", { agent })
       : details.kind === "file"
         ? t("approval.fileTitle", { agent })
@@ -73,12 +77,26 @@ export function ApprovalCard({
           <code>{details.command}</code>
         </pre>
       ) : null}
+      {library ? <>
+        <p className="approval-card-reason">{t("approval.libraryAddDetail", { source: library.source })}</p>
+        {library.author || library.license ? (
+          <p className="approval-card-reason">{[
+            library.author ? t("approval.libraryAddAuthor", { author: library.author }) : undefined,
+            library.license ? t("approval.libraryAddLicense", { license: library.license }) : undefined,
+          ].filter(Boolean).join(" · ")}</p>
+        ) : null}
+        {library.url ? <p className="approval-card-path"><code>{library.url}</code></p> : null}
+      </> : null}
+      {/* What the window words itself, it shows instead of the English request. */}
+      {details.input !== undefined && !library ? (
+        <pre className="approval-card-detail"><code>{details.input}</code></pre>
+      ) : null}
       {details.path ? (
         <p className="approval-card-path">
           <code>{details.path}</code>
         </p>
       ) : null}
-      {details.reason ? (
+      {details.reason && !library ? (
         <p className="approval-card-reason">{details.reason}</p>
       ) : null}
       {details.paths?.length ? (
@@ -98,7 +116,8 @@ export function ApprovalCard({
         </ul>
       ) : null}
       {details.network ? <p>{t("approval.networkAccess")}</p> : null}
-      {details.always?.rules.length ? (
+      {details.pluginAccess ? <p className="approval-card-reason">{t("pluginAccess.approveDetail", { plugin: details.pluginAccess.plugin })}</p> : null}
+      {!details.pluginAccess && details.always?.rules.length ? (
         <p className="approval-card-reason">
           {t("approval.alwaysCovers", {
             rules: details.always.rules.join(", "),
@@ -110,11 +129,11 @@ export function ApprovalCard({
           size="sm"
           variant="primary"
           disabled={submitting}
-          onClick={() => void decide("allow")}
+          onClick={() => void decide(details.pluginAccess ? "allow-always" : "allow")}
         >
-          {t("approval.allow")}
+          {t(details.pluginAccess ? "pluginAccess.allowRemember" : "approval.allow")}
         </Button>
-        {details.always ? (
+        {details.pluginAccess ? <Button size="sm" disabled={submitting} onClick={() => void decide("allow")}>{t("pluginAccess.allowOnce")}</Button> : details.always ? (
           <Button
             size="sm"
             disabled={submitting}
@@ -146,6 +165,8 @@ export function approvalOutcomeLabel(
   item: Extract<ThreadItem, { type: "approvalRequest" }>,
 ): string {
   const subject =
+    item.request.pluginAccess?.label ??
+    item.request.libraryAdd?.name ??
     item.request.command ??
     item.request.path ??
     (item.request.paths?.length

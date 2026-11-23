@@ -51,10 +51,11 @@ describe("renderer routes", () => {
     expect(sidebarHash("plugins")).toBe("#/plugins");
     expect(pluginHash("personal:game tools")).toBe("#/plugins/personal%3Agame%20tools");
     expect(parseAppRoute(pluginHash("personal:game tools"))).toEqual({ page: "plugins", pluginId: "personal:game tools" });
+    expect(parseAppRoute(pluginHash("acme/maker", "installed"))).toEqual({ page: "plugins", pluginId: "acme/maker", tab: "installed" });
     expect(parseAppRoute("#/plugins/personal%3Agame%20tools")).toEqual({ page: "plugins", pluginId: "personal:game tools" });
     expect(parseAppRoute("#/plugins")).toEqual({ page: "plugins" });
     expect(parseAppRoute("#/settings/plugins")).toEqual({ page: "plugins" });
-    // More types… opens the marketplace at the plugins that add a project type.
+    // More types opens the marketplace at the plugins that add a project type.
     expect(parseAppRoute(pluginBrowseHash("projectType"))).toEqual({ page: "plugins", adds: "projectType" });
     expect(parseAppRoute("#/plugins?adds=unknown")).toEqual({ page: "home" });
     expect(parseAppRoute(pluginsTabHash("mine"))).toEqual({ page: "plugins", tab: "mine" });

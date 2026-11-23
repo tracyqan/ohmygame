@@ -131,10 +131,20 @@ For an urgent released-version fix, start a `fix/<short-name>` branch from
 `@ohmygame/plugin-ui`, `@ohmygame/plugin-cli` and `create-ohmygame-plugin`
 carry the plugin API version, `PLUGIN_HOST_API_VERSION` in
 `src/shared/plugin-manifest.ts`, and a test keeps their `version` equal to it.
-When a release raises that version, publish all three from that release's
-commit once the release is out, since a plugin they make needs its plugin API.
-Sign in to npm as a member of the `@ohmygame` organization, and check each
-package's files with `npm pack --dry-run` first:
+A plugin they make needs that plugin API, so they are published from a
+release's commit once the release is out.
+
+The [plugin packages workflow](../.github/workflows/release-plugin-packages.yml)
+does this after each successful tag run of the desktop release workflow. It
+runs the packages' tests, then publishes each package whose version isn't on
+npm yet, so a release that didn't raise the plugin API publishes nothing. It
+uses npm trusted publishing, with no token: each package's settings on npmjs.com
+name `WhiteTowerAI/ohmygame` and `release-plugin-packages.yml` as its trusted
+publisher. A manual run packs the packages without publishing them.
+
+If it fails, rerun it from the Actions page, or publish by hand from the
+release's commit, signed in to npm as a member of the `@ohmygame`
+organization, after checking each package's files with `npm pack --dry-run`:
 
 ```sh
 (cd packages/plugin-ui && npm publish --access public)
@@ -147,13 +157,13 @@ The last two build their `dist/` from the app's code before packing
 
 ## Publishing the SDK
 
-`@ohmygame/sdk` is released on its own, from the
-[SDK release workflow](../.github/workflows/release-sdk.yml), whenever its
+`@ohmygame/game-sdk` is released on its own, from the
+[SDK release workflow](../.github/workflows/release-game-sdk.yml), whenever its
 changes should reach games; the desktop app copies the SDK from this repository
 and does not wait for it.
 
-1. In a PR into `dev`, raise `version` in `packages/sdk/package.json` and add
-   its section to `packages/sdk/CHANGELOG.md`, `## [0.0.3] - YYYY-MM-DD`,
+1. In a PR into `dev`, raise `version` in `packages/game-sdk/package.json` and
+   add its section to `packages/game-sdk/CHANGELOG.md`, `## [0.0.2] - YYYY-MM-DD`,
    listing what games and their developers can notice. Run `bun install` so
    `bun.lock` records the new version. A change to the room protocol also
    follows [protocol versions](multiplayer.md#protocol-versions): add a version,
@@ -161,11 +171,17 @@ and does not wait for it.
 2. Optionally run the workflow by hand on that branch: it runs every check and
    packs the package without publishing it. GitHub offers the manual run only
    once the workflow is on `main`.
-3. Once the PR is merged, tag the merge commit `sdk-v<version>`, for example
-   `git tag sdk-v0.0.3 <commit> && git push origin sdk-v0.0.3`. The workflow
-   checks that the tag, `package.json` and the changelog agree, runs the SDK's
-   tests, and publishes with npm provenance.
+3. Once the PR is merged, tag the merge commit `game-sdk-v<version>`, for
+   example `git tag game-sdk-v0.0.2 <commit> && git push origin game-sdk-v0.0.2`.
+   The workflow checks that the tag, `package.json` and the changelog agree,
+   runs the SDK's tests, and publishes with npm provenance.
 
-The workflow publishes with the `NPM_TOKEN` repository secret, an npm
-automation token of a member of the `@ohmygame` organization. A tag whose
-version is already on npm fails at the publish step; raise the version instead.
+The workflow uses npm Trusted Publishing (GitHub Actions OIDC), with no
+`NPM_TOKEN` secret: on npmjs.com, `@ohmygame/game-sdk` names
+`WhiteTowerAI/ohmygame` and the workflow file `release-game-sdk.yml` as its
+trusted publisher. Trusted Publishing is set up on a package that exists, so
+`0.0.1` was published by hand from `packages/game-sdk` (`npm publish --access
+public`) on 2026-11-19 to create it, and has no tag; every later version goes
+through the workflow. A tag whose version is already on npm fails at the
+publish step; raise the version instead.
+

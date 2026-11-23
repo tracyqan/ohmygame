@@ -1,3 +1,4 @@
+import { publicationOf, withRename, type GameRename } from "../shared/publish-v1.js";
 import type { ConversationAgentSettings, ConversationAgentState, ConversationDetail, ConversationSummary, PendingPrompt, PlanSessionState, ProjectState, PublicationState, PromptContextLabel, ScheduledMessage, RuntimeEvent, ThreadItem, Turn, TurnStatus } from "../shared/contracts.js";
 import { finalizeTurnItems } from "../shared/turns.js";
 
@@ -15,6 +16,7 @@ export interface RendererState {
   pendingPrompts: PendingPrompt[];
   scheduledMessages: ScheduledMessage[];
   lastEventId: number;
+  eventEpoch?: string;
   notice?: string;
 }
 
@@ -22,6 +24,7 @@ export type RendererAction =
   | { type: "initialized"; project: ProjectState; detail: ConversationDetail }
   | { type: "project-updated"; project: ProjectState }
   | { type: "publication-updated"; projectId: string; publication: PublicationState }
+  | { type: "game-renamed"; projectId: string; renamed: GameRename }
   | { type: "conversation-loaded"; detail: ConversationDetail }
   | { type: "runtime-event"; event: RuntimeEvent }
   /** With a conversation ID, applies only while that conversation is open. */
@@ -59,11 +62,15 @@ export function rendererReducer(state: RendererState, action: RendererAction): R
       scheduledMessages: detail.scheduledMessages,
       notice: undefined,
       lastEventId: detail.cursor,
+      eventEpoch: detail.eventEpoch,
     };
   }
   if (action.type === "project-updated") return { ...state, project: action.project };
   if (action.type === "publication-updated") return state.project?.id === action.projectId
     ? { ...state, project: { ...state.project, publication: action.publication } }
+    : state;
+  if (action.type === "game-renamed") return state.project?.id === action.projectId && state.project.publication
+    ? { ...state, project: { ...state.project, publication: withRename(state.project.publication, action.renamed) } }
     : state;
   if (action.type === "connection") return { ...state, connection: action.status };
   if (action.type === "conversation-settings") {
@@ -79,7 +86,7 @@ export function reduceRuntimeEvent(state: RendererState, event: RuntimeEvent): R
   const next = { ...state, lastEventId: event.id, notice: undefined };
   const project = state.project;
   const conversation = state.conversation;
-  const conversationScopedEvent = event.type.startsWith("agent.") || event.type.startsWith("item.") || event.type.startsWith("plan.") || event.type.startsWith("prompt.") || event.type === "scheduled.changed" || event.type === "conversation.model.changed" || event.type === "checkpoint.created" || event.type === "checkpoint.completed" || event.type === "workspace.undone" || event.type === "workspace.reapplied";
+  const conversationScopedEvent = event.type.startsWith("agent.") || event.type.startsWith("item.") || event.type.startsWith("plan.") || event.type.startsWith("prompt.") || event.type === "scheduled.changed" || event.type === "conversation.model.changed" || event.type === "conversation.settings.changed" || event.type === "checkpoint.created" || event.type === "checkpoint.completed" || event.type === "workspace.undone" || event.type === "workspace.reapplied";
   if (conversationScopedEvent && (!conversation || event.conversationId !== conversation.id)) return next;
 
   switch (event.type) {
@@ -87,6 +94,8 @@ export function reduceRuntimeEvent(state: RendererState, event: RuntimeEvent): R
       return conversation?.id === event.data.conversation.id
         ? { ...next, conversation: event.data.conversation }
         : next;
+    case "conversation.settings.changed":
+      return { ...next, settings: event.data.settings };
     case "conversation.model.changed":
       if (!conversation) return next;
       return {
@@ -208,7 +217,7 @@ export function reduceRuntimeEvent(state: RendererState, event: RuntimeEvent): R
     case "agent.error":
       return finishAgent(next, event.turnId, "failed", event.data.error);
     case "publish.completed":
-      return project ? { ...next, project: { ...project, publication: { gameId: event.data.game.id, deploymentId: event.data.game.deploymentId, playUrl: event.data.game.playUrl, publishedAt: event.data.game.publishedAt, title: event.data.game.title, description: event.data.game.description } } } : next;
+      return project ? { ...next, project: { ...project, publication: publicationOf(event.data.game) } } : next;
     case "publish.error":
       return { ...next, notice: event.data.error };
     case "publish.started":
@@ -241,6 +250,7 @@ function promptTurn(
     images?: PendingPrompt["images"];
     attachments?: PendingPrompt["attachments"];
     contexts?: PromptContextLabel[];
+    source?: { plugin: string };
   },
   status: TurnStatus,
   timestamp?: number,
@@ -260,6 +270,7 @@ function promptTurn(
       turnId,
       type: "userMessage",
       text: prompt.prompt,
+      ...("source" in prompt && prompt.source ? { source: prompt.source } : {}),
       ...(mentions.length ? { mentions } : {}),
       ...(images.length ? { images } : {}),
       ...(attachments.length ? { attachments } : {}),

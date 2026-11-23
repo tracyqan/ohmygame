@@ -431,8 +431,8 @@ describe("renderer service recovery", () => {
         );
       }),
     );
-    const reset = vi.fn(async () => 0);
-    const unsubscribe = subscribeToProject("project", 50, {
+    const reset = vi.fn(async () => ({ cursor: 0 }));
+    const unsubscribe = subscribeToProject("project", { cursor: 50 }, {
       onEvent: (event) => received.push(event.id),
       onOpen: () => {},
       onError: () => {},
@@ -502,6 +502,9 @@ describe("pane and preview boundaries", () => {
     const { updateRuntimeConnection } = await import("../src/renderer/runtime-connection.js");
     updateRuntimeConnection(ready(1));
     const open = vi.spyOn(window, "open").mockReturnValue(null);
+    // The desktop app's openExternal takes only sign-in pages; the game goes through a new window.
+    const openExternal = vi.fn(async () => { throw new Error("Invalid OAuth authorization URL"); });
+    Object.assign(window.ohMyGameDesktop!, { openExternal });
     const project: ProjectState = { id: "routes", name: "Routes", type: "web-game", updatedAt: new Date(0).toISOString(), workspacePath: "/tmp/routes", preview: { status: "ready", url: "http://127.0.0.1:4000" } };
     const props = { project, publishing: false, workspaceRevision: 0, onPublish: async () => false, onClosePublish: () => {}, onRestart: () => {}, onStop: async () => {} };
     await act(async () => root.render(createElement(CodingWorkspace, props)));
@@ -526,6 +529,7 @@ describe("pane and preview boundaries", () => {
     expect(page.searchParams.get("__ohmygame_view")).toBe("external");
     expect(page.searchParams.get("__ohmygame_client")).toMatch(/.+/);
     expect(page.searchParams.get("__ohmygame_client")).not.toBe(client);
+    expect(openExternal).not.toHaveBeenCalled();
     await act(async () => (container.querySelector('[aria-label="Reload preview"]') as HTMLButtonElement).click());
     expect(container.querySelector("iframe")).not.toBe(frame);
     const reloaded = new URL(container.querySelector("iframe")!.src);
@@ -548,6 +552,13 @@ describe("pane and preview boundaries", () => {
     document.body.append(panel);
     const props = { project, publishing: false, workspaceRevision: 0, onPublish: async () => false, onClosePublish: () => {}, onRestart: () => {} };
     await act(async () => root.render(createElement(CodingWorkspace, { ...props, panels: { nodes, visible: new Set(["preview", "code"] as const), onShow: () => {} } })));
+    await act(async () => (document.querySelector('[aria-label="More"]') as HTMLButtonElement).click());
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent?.includes("Preview logs"))!.click());
+    // The desktop game steps aside for the logs, and the same menu item closes them.
+    expect(document.querySelector(".preview-logs")?.hasAttribute("data-native-preview-overlay")).toBe(true);
+    await act(async () => (document.querySelector('[aria-label="More"]') as HTMLButtonElement).click());
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent?.includes("Close preview logs"))!.click());
+    expect(document.querySelector(".preview-logs")).toBeNull();
     await act(async () => (document.querySelector('[aria-label="More"]') as HTMLButtonElement).click());
     await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent?.includes("Preview logs"))!.click());
     // Only the Code panel is on screen now.
@@ -641,5 +652,57 @@ describe("pane and preview boundaries", () => {
     );
     expect(container.querySelector(".preview-diagnostic")).toBeNull();
     expect(container.querySelector("iframe")).toBe(frame);
+  });
+});
+
+describe("game panel without a web build", () => {
+  it("shows a folder without a web project, a long error's first line, and plugins' ways to start the game", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const { PreviewView } = await import("../src/renderer/coding-workspace.js");
+    const { PluginSlotsContext } = await import("../src/renderer/project-plugin-contributions.js");
+    const run = vi.fn(async () => undefined);
+    const command = { id: "acme/engine:run", plugin: "acme/engine", title: "Run in Engine", slots: [{ slot: "game.start" }], run: { native: "run" } };
+    const slots = { commands: [command], when: { values: {}, plugins: new Set(["acme/engine"]) }, run };
+    const project = { id: "project", name: "Game", type: "general" as const, updatedAt: new Date(0).toISOString(), workspacePath: "/tmp/project" };
+    const view = (preview: object, withSlots = true) => {
+      const element = createElement(PreviewView, { project: { ...project, preview } as never, url: undefined, reload: 0, revision: 0, viewport: "fit" as const, onRetry: () => {}, onSettings: () => {} });
+      return withSlots ? createElement(PluginSlotsContext.Provider, { value: slots as never }, element) : element;
+    };
+    await act(async () => root.render(view({ status: "waiting", error: "This folder has no package.json dev script that starts a preview server.", issue: "no-web-project" }, false)));
+    expect(container.textContent).toContain("No web game in this folder");
+    expect(container.textContent).not.toContain("package.json dev script that starts");
+    await act(async () => root.render(view({ status: "waiting", error: "This folder has no package.json dev script that starts a preview server.", issue: "no-web-project" })));
+    expect(container.textContent).toContain("Play it in its engine");
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Run in Engine")!.click());
+    expect(run).toHaveBeenCalledWith(command);
+    // A Web Game project has no web preview switch to turn off, so it shows the error as it is.
+    await act(async () => root.render(createElement(PreviewView, { project: { ...project, type: "web-game", preview: { status: "waiting", error: "This folder has no package.json dev script that starts a preview server.", issue: "no-web-project" } } as never, url: undefined, reload: 0, revision: 0, viewport: "fit" as const, onRetry: () => {}, onSettings: () => {} })));
+    expect(container.textContent).not.toContain("No web game in this folder");
+    expect(container.textContent).toContain("package.json dev script that starts");
+    await act(async () => root.render(view({ status: "error", error: "Godot's web export templates aren't installed.\nexport: line 1\nexport: line 2" })));
+    expect(container.querySelector('[role="alert"] > span')?.textContent).toBe("Godot's web export templates aren't installed.");
+    expect(container.querySelector('[role="alert"] details')?.textContent).toContain("export: line 2");
+    expect([...container.querySelectorAll(".preview-recovery-actions button")].map((button) => button.textContent)).toContain("Run in Engine");
+    // An engine's plugin the folder turned on, waiting to be allowed, is offered first; allowing it is what adds its commands.
+    const allow = vi.fn(async () => { throw new Error("Wait for the agent to finish first"); });
+    const waiting = { commands: [], when: { values: {}, plugins: new Set<string>() }, run, waiting: [{ id: "acme/unreal", displayName: "Unreal Engine" }], allow };
+    await act(async () => root.render(createElement(PluginSlotsContext.Provider, { value: waiting as never },
+      createElement(PreviewView, { project: { ...project, preview: { status: "waiting", error: "no package.json", issue: "no-web-project" } } as never, url: undefined, reload: 0, revision: 0, viewport: "fit" as const, onRetry: () => {}, onSettings: () => {} }))));
+    expect(container.textContent).toContain("Unreal Engine recognizes this folder as its project");
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Allow Unreal Engine")!.click());
+    expect(allow).toHaveBeenCalledWith("acme/unreal");
+    expect(container.querySelector(".game-start-error")?.textContent).toBe("Wait for the agent to finish first");
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("gives `when` the preview's status", async () => {
+    const { projectWhenContext } = await import("../src/renderer/project-plugin-contributions.js");
+    const { matchesWhen } = await import("../src/shared/plugin-when.js");
+    const context = projectWhenContext({ type: "general", preview: { status: "error" } }, []);
+    expect(matchesWhen("preview.status == 'error'", context)).toBe(true);
+    expect(matchesWhen("preview.status == 'error'", projectWhenContext({ type: "general" }, []))).toBe(false);
   });
 });

@@ -1,8 +1,8 @@
 import { protocolOperations } from "../shared/model3d-operations.js";
 import { useState } from "react";
 import {
-  IMAGE_ASPECT_RATIOS, IMAGE_MAX_REFERENCE_IMAGES, IMAGE_RESOLUTIONS, IMAGE_OUTPUT_COUNTS, VIDEO_ASPECT_RATIOS, VIDEO_RESOLUTIONS,
-  type CustomModel3DSettings, type CustomModelUsages, type CustomProviderPreset, type ImageProtocol, type VideoProtocol,
+  IMAGE_ASPECT_RATIOS, IMAGE_MAX_REFERENCE_IMAGES, IMAGE_RESOLUTIONS, IMAGE_OUTPUT_COUNTS, IMAGE_OUTPUT_FORMATS, VIDEO_ASPECT_RATIOS, VIDEO_RESOLUTIONS,
+  type CustomModel3DSettings, type CustomModelUsages, type CustomProviderPreset, type ImageOutputFormat, type ImageProtocol, type VideoProtocol,
 } from "../shared/contracts.js";
 import { defaultImageSettings, defaultModel3DSettings, defaultVideoSettings, IMAGE_PROTOCOL_LABELS, VIDEO_PROTOCOL_LABELS } from "../shared/custom-models.js";
 import { knownImageReferenceLimit } from "../shared/image-reference-limits.js";
@@ -48,6 +48,12 @@ export function CustomModelUsageFields({ usages, preset, modelId, onChange }: {
           <NumberField label={t("modelUsage.maxReferenceImages")} value={image.maxReferenceImages} min={0} max={IMAGE_MAX_REFERENCE_IMAGES} onChange={(maxReferenceImages) => onChange({ ...usages, image: { ...image, maxReferenceImages } })} />
           <label><span>{t("modelUsage.maxOutputs")}</span><select value={image.maxOutputs} onChange={(event) => onChange({ ...usages, image: { ...image, maxOutputs: Number(event.target.value) as typeof image.maxOutputs } })}>{IMAGE_OUTPUT_COUNTS.map((count) => <option key={count}>{count}</option>)}</select></label>
         </div>
+        {image.protocol === "openai-images" ? <label><span>{t("modelUsage.imageOutputFormat")}</span>
+          <select value={image.outputFormat ?? "webp"} onChange={(event) => onChange({ ...usages, image: { ...image, outputFormat: event.target.value as ImageOutputFormat } })}>
+            {IMAGE_OUTPUT_FORMATS.map((format) => <option key={format} value={format}>{t(`modelUsage.imageOutputFormats.${format}`)}</option>)}
+          </select>
+          <small>{t("modelUsage.imageOutputFormatHint")}</small>
+        </label> : null}
         {referenceDefault !== undefined && referenceDefault !== image.maxReferenceImages ? <button className="settings-secondary-button" type="button" onClick={() => onChange({ ...usages, image: { ...image, maxReferenceImages: referenceDefault } })}>{t("modelUsage.useReferenceDefault", { count: referenceDefault })}</button> : null}
       </Disclosure>
     </div> : null}
@@ -120,10 +126,10 @@ export function Model3DSettingsFields({ value, onChange, lockCapabilities = fals
 function EndpointField({ value, onChange }: { value?: string; onChange: (value: string | undefined) => void }) {
   return <label><span>{t("modelUsage.baseUrlOverride")}</span><input type="url" value={value ?? ""} onChange={(event) => onChange(event.target.value || undefined)} placeholder={t("customProvider.useProviderBaseUrl")} autoComplete="off" spellCheck={false} /><small>{t("modelUsage.baseUrlBlank")}</small></label>;
 }
-function NumberField({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void }) {
+export function NumberField({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void }) {
   return <label><span>{label}</span><input type="number" min={min} max={max} step={1} value={Number.isNaN(value) ? "" : value} onChange={(event) => onChange(event.target.value === "" ? NaN : Number(event.target.value))} /></label>;
 }
-function NumberListField({ label, value, onChange }: { label: string; value: readonly number[]; onChange: (value: number[]) => void }) {
+export function NumberListField({ label, value, onChange }: { label: string; value: readonly number[]; onChange: (value: number[]) => void }) {
   const [draft, setDraft] = useState<{ text: string; values: number[] }>();
   const text = draft && draft.values.length === value.length && draft.values.every((item, index) => Object.is(item, value[index])) ? draft.text : value.join(", ");
   return <label><span>{label}</span><input value={text} onChange={(event) => {
@@ -133,6 +139,6 @@ function NumberListField({ label, value, onChange }: { label: string; value: rea
     onChange(values);
   }} /><small>{t("modelUsage.commas")}</small></label>;
 }
-function ChoiceFields<T extends string>({ label, options, labels, value, onChange }: { label: string; options: readonly T[]; labels?: Partial<Record<T, string>>; value: readonly T[]; onChange: (value: T[]) => void }) {
+export function ChoiceFields<T extends string>({ label, options, labels, value, onChange }: { label: string; options: readonly T[]; labels?: Partial<Record<T, string>>; value: readonly T[]; onChange: (value: T[]) => void }) {
   return <fieldset className="custom-model-choices"><legend>{label}</legend><div className="custom-provider-capabilities">{options.map((option) => <label key={option}><input type="checkbox" checked={value.includes(option)} onChange={(event) => onChange(event.target.checked ? [...value, option] : value.filter((item) => item !== option))} />{labels?.[option] ?? option}</label>)}</div></fieldset>;
 }

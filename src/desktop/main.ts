@@ -1,3 +1,4 @@
+import { ElectronBrowserDriver } from "./browser-driver.js";
 import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createReadStream, mkdirSync, readFileSync } from "node:fs";
@@ -6,7 +7,7 @@ import { Readable } from "node:stream";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerSaveBlocker, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerSaveBlocker, session, shell, Tray } from "electron";
 import { clipboardFilePaths, loadClipboardFiles } from "./file-clipboard.js";
 import { installExternalMcpLauncher, markExternalMcpApp } from "./external-mcp-install.js";
 import { DaemonSupervisor } from "./daemon-supervisor.js";
@@ -17,25 +18,31 @@ import { createNetworkDispatcher } from "../daemon/proxy.js";
 import { electronProxyConfig, prepareDesktopNetwork, proxyCredentials } from "./network.js";
 import { gameSignInIssuer } from "./game-sign-in.js";
 import { loadEnvironmentFiles } from "../daemon/environment.js";
+import { readUsageData, updateUsageData } from "./usage-data.cjs";
+import { GpuCrashCounter, isGpuCrash, readGpuFallback, setGpuFallback } from "./gpu-fallback.js";
 import { ignoreBrokenStdio } from "./stdio.js";
 import { RotatingLogFile } from "./log-file.js";
 import { createLogRedactor } from "../shared/log-redaction.js";
 import { desktopDiagnosticsArchive } from "./diagnostics-export.js";
 import { recordConsole, recordUncaughtErrors, rendererConsoleLines, runtimeStateLine, updateFailureLine } from "./console-log.js";
 import { createDesktopWindow, fitPlaytestContentSize, isValidPlaytestViewport, waitForRenderer } from "./window.js";
-import { applicationMenuTemplate, isApplicationMenuLabels } from "./application-menu.js";
+import { applicationMenuTemplate, isApplicationMenuLabels, windowContextMenuTemplate } from "./application-menu.js";
+import { openInBrowser } from "./open-in-browser.js";
 import { DesktopUpdatePreparationError, DesktopUpdater } from "./updater.js";
 import { DesktopUpdateCheckScheduler } from "./update-check-scheduler.js";
 import { ElectronPlaytestDriver } from "./playtest-driver.js";
 import { GameRecorder, type GameRecordingFile } from "./game-recorder.js";
 import { GAME_RECORDING_MAX_SECONDS, gameRecordingFileName, type GameRecordingSaved, type GameRecordingState } from "../shared/game-recording.js";
 import { WebGamePlayerWindows, type WebGamePlayerTarget } from "./web-game-player.js";
+import { BrowserViews } from "./browser-views.js";
+import { isBrowserMenuLabels, isBrowserUrl, type ProjectBrowser } from "../shared/browser.js";
+import { BackgroundRunning } from "./background-running.js";
 import { RendererCloseRequest } from "./renderer-close.js";
 import { AsyncTaskPool } from "./async-task-pool.js";
-import { AgentNotifications, waitingDotBitmap } from "./agent-notifications.js";
+import { AgentNotifications, trayBadgeBitmap, waitingDotBitmap } from "./agent-notifications.js";
 import { NotificationPermission } from "./notification-permission.js";
 import type { AgentNoticesResponse } from "../shared/agent-notices.js";
-import { parseAgentNotificationPreferences, parseAgentNotificationTarget, type AgentNotificationTarget } from "../shared/agent-notifications.js";
+import { parseAgentNotificationPreferences, parseAgentNotificationTarget, parseAgentResultRead, type AgentNotificationTarget } from "../shared/agent-notifications.js";
 import { isNodeGraph } from "../shared/playable-graph-validation.js";
 import type { NodeThumbnailResult, PlayableThumbnailSnapshot } from "../shared/playable-player-protocol.js";
 import { PROJECT_FILE_OPEN_MODES, type ProjectFileOpenMode } from "../shared/contracts.js";
@@ -62,6 +69,53 @@ mainLog.line(`OhMyGame ${app.getVersion()} starting on ${process.platform} ${pro
 // Windows shows notifications only for the app ID of the installer's Start menu shortcut, the `appId` in electron-builder.yml.
 if (process.platform === "win32") app.setAppUserModelId("ai.ohmygame.desktop");
 let mainWindow: BrowserWindow | undefined;
+let backgroundRunning: BackgroundRunning | undefined;
+let backgroundTray: Tray | undefined;
+/** The tray icon without a badge, restored once nothing waits or stays unread. */
+let trayIcon: Electron.NativeImage | undefined;
+let menuLabels: Record<string, string> = {};
+
+function refreshTrayMenu(): void {
+  if (!backgroundTray || backgroundTray.isDestroyed()) return;
+  backgroundTray.setContextMenu(Menu.buildFromTemplate([
+    { label: menuLabels.openApp ?? "Open OhMyGame", click: () => { void showMainWindow(); } },
+    { label: menuLabels.quit ?? "Exit", click: () => app.quit() },
+  ]));
+}
+
+async function createBackgroundTray(): Promise<Tray> {
+  // The packaged executable carries the application's icon; no separate asset path is needed.
+  const icon = await app.getFileIcon(process.execPath, { size: "small" });
+  if (icon.isEmpty()) throw new Error("Could not load the background tray icon");
+  trayIcon = icon;
+  badgedTrayIcon = undefined;
+  const tray = new Tray(icon);
+  try {
+    tray.setToolTip("OhMyGame");
+    tray.on("click", () => { void showMainWindow(); });
+    backgroundTray = tray;
+    refreshTrayMenu();
+    // Notices may have arrived before the tray existed; carry their badge over.
+    if (process.platform === "win32") updateBadges();
+    return tray;
+  } catch (cause) {
+    tray.destroy();
+    throw cause;
+  }
+}
+
+async function showMainWindow(): Promise<void> {
+  if (!daemon || !startupComplete || quitting) return;
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) await openMainWindow();
+    if (mainWindow?.isMinimized()) mainWindow.restore();
+    mainWindow?.show();
+    mainWindow?.focus();
+  } catch (cause) {
+    console.error(cause);
+    dialog.showErrorBox("OhMyGame could not open a window", cause instanceof Error ? cause.message : String(cause));
+  }
+}
 /** The account service published games sign in with, from the daemon's environment. */
 let gameSignIn: string | undefined;
 const playtestWindows = new Map<string, BrowserWindow | Promise<BrowserWindow>>();
@@ -106,6 +160,15 @@ const webGamePlayers = new WebGamePlayerWindows((state) => {
     publishGameRecording({ projectId, status: "idle", error: cause instanceof Error ? cause.message : String(cause) });
   });
 });
+const browserViews = new BrowserViews({
+  onState: (state) => mainWindow?.webContents.send("ohmygame:browser-state", state),
+  onCommand: (projectId, command) => mainWindow?.webContents.send("ohmygame:browser-command", projectId, command),
+  openExternal: (url) => void shell.openExternal(url).catch(() => {}),
+});
+const agentBrowser = new ElectronBrowserDriver(browserViews, (projectId) => {
+  mainWindow?.show();
+  mainWindow?.webContents.send("ohmygame:browser-command", projectId, "reveal");
+});
 /** People's recordings, by project; an agent's belong to its playtest session. */
 const gameRecordings = new Map<string, GameRecordingState>();
 const gameRecordingStarts = new Set<string>();
@@ -118,6 +181,28 @@ let restartPending = false;
 let rendererClose: RendererCloseRequest | undefined;
 let shutdown: Promise<void> | undefined;
 let updater: DesktopUpdater | undefined;
+/** Set when the GPU process kept crashing; software rendering takes its place on the next launch. */
+const gpuFallbackFile = path.join(app.getPath("userData"), "gpu-fallback.json");
+const gpuCrashes = new GpuCrashCounter(gpuFallbackFile);
+if (gpuCrashes.startedWithFallback) app.disableHardwareAcceleration();
+let gpuRestartPending = false;
+app.on("child-process-gone", (_event, details) => {
+  if (!isGpuCrash(details) || gpuRestartPending) return;
+  mainLog.line(`GPU process gone: ${details.reason}${details.exitCode !== undefined ? ` (exit ${details.exitCode})` : ""}`);
+  try {
+    if (!gpuCrashes.recordGpuCrash()) return;
+  } catch (cause) {
+    // The fallback flag could not be saved; relaunching would only repeat the crashes.
+    mainLog.line(`Could not save the software-rendering fallback: ${cause instanceof Error ? cause.message : String(cause)}`);
+    return;
+  }
+  mainLog.line("The GPU process kept crashing; restarting with software rendering.");
+  gpuRestartPending = true;
+  // The crashes happen within seconds of launch, likely before the daemon is
+  // ready, so the relaunch is asked for here instead of the shutdown path.
+  app.relaunch();
+  app.quit();
+});
 let updateChecks: DesktopUpdateCheckScheduler | undefined;
 const oauth = new OAuthCallbackFlow(() => mainWindow?.webContents.send("ohmygame:auth-callback"));
 /** The conversation a clicked notification opens, kept until the main window takes it. */
@@ -153,8 +238,11 @@ const agentNotifications = new AgentNotifications({
   },
   showWaiting: (count, description) => {
     waiting = { count, description };
-    if (process.platform === "win32") showWaitingOverlay();
-    else app.setBadgeCount(count);
+    updateBadges();
+  },
+  showUnread: (count, description) => {
+    unread = { count, description };
+    updateBadges();
   },
   requestAttention: () => {
     if (process.platform === "darwin") app.dock?.bounce("informational");
@@ -175,15 +263,48 @@ const agentNotifications = new AgentNotifications({
   },
 });
 
-/** What waits for the user, kept so a new main window gets its taskbar overlay too. */
+/** What waits for the user and what finished unread, kept so badges stay in step on every surface. */
 let waiting = { count: 0, description: "" };
+let unread = { count: 0, description: "" };
 let waitingOverlay: Electron.NativeImage | undefined;
+let badgedTrayIcon: Electron.NativeImage | undefined;
+
+function badgeCount(): number {
+  return waiting.count + unread.count;
+}
+
+function badgeDescription(): string {
+  return [waiting, unread].filter((part) => part.count).map((part) => `${part.description} (${part.count})`).join(" · ");
+}
+
+/** Publishes the waiting and unread counts to whichever surfaces this platform has. */
+function updateBadges(): void {
+  if (process.platform !== "win32") {
+    app.setBadgeCount(badgeCount());
+    return;
+  }
+  // Windows taskbar buttons carry no count, and the overlay vanishes once the window hides to the tray.
+  showWaitingOverlay();
+  if (!backgroundTray || backgroundTray.isDestroyed() || !trayIcon) return;
+  if (!badgeCount()) {
+    backgroundTray.setImage(trayIcon);
+    backgroundTray.setToolTip("OhMyGame");
+    return;
+  }
+  if (!badgedTrayIcon) {
+    const size = trayIcon.getSize();
+    badgedTrayIcon = nativeImage.createFromBitmap(trayBadgeBitmap(trayIcon.toBitmap(), size), size);
+  }
+  backgroundTray.setImage(badgedTrayIcon);
+  backgroundTray.setToolTip(`OhMyGame (${badgeDescription()})`);
+}
 
 /** Windows has no count on taskbar buttons, so a dot on the main window's button marks that something waits. */
 function showWaitingOverlay(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   waitingOverlay ??= nativeImage.createFromBitmap(waitingDotBitmap(), { width: 16, height: 16 });
-  mainWindow.setOverlayIcon(waiting.count ? waitingOverlay : null, waiting.count ? waiting.description : "");
+  const count = badgeCount();
+  mainWindow.setOverlayIcon(count ? waitingOverlay : null, count ? badgeDescription() : "");
 }
 
 /** Removes the record that tells `ohmygame-mcp` the app is already running. */
@@ -193,6 +314,8 @@ async function stopServices(): Promise<void> {
   updateChecks?.stop();
   agentNotifications.stop();
   webGamePlayers.close();
+  agentBrowser.close();
+  browserViews.dispose();
   agentPlaytests.close();
   gameRecorder.close();
   await Promise.all([daemon?.stop(), oauth.cancel()]);
@@ -311,7 +434,9 @@ handle("ohmygame:set-application-menu-labels", (event, labels: unknown) => {
   if (!mainWindow || event.sender !== mainWindow.webContents || !isApplicationMenuLabels(labels)) {
     throw new Error("Invalid application menu labels");
   }
+  menuLabels = labels;
   Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate(labels, process.platform)));
+  refreshTrayMenu();
 });
 handle("ohmygame:browse-plugin-directory", async (event, pluginId: unknown) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error("Invalid browse source");
@@ -387,6 +512,21 @@ handle("ohmygame:remove-project", async (event, projectId: unknown) => {
     throw new Error(`The project was removed, but its files could not be moved to the Trash. They are in ${result.movedTo}`);
   }
   await rmdir(path.dirname(result.movedTo)).catch(() => {});
+});
+handle("ohmygame:read-usage-data", () => readUsageData());
+handle("ohmygame:update-usage-data", (event, enabled: unknown, initialize: unknown) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents ||
+      event.senderFrame !== mainWindow.webContents.mainFrame ||
+      typeof enabled !== "boolean" || typeof initialize !== "boolean") {
+    throw new Error("Invalid usage data request");
+  }
+  const saved = updateUsageData(enabled, initialize);
+  for (const opening of playtestWindows.values()) {
+    void Promise.resolve(opening).then((window) => {
+      if (!window.isDestroyed()) window.webContents.send("ohmygame:usage-data-changed", readUsageData());
+    }).catch(() => {});
+  }
+  return saved;
 });
 handle("ohmygame:open-logs-directory", async (event) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error("Invalid logs folder source");
@@ -485,6 +625,54 @@ handle("ohmygame:capture-web-game-preview", (event, projectId: unknown) => {
   requirePlayerSource(event.sender, projectId);
   return webGamePlayers.capture(projectId);
 });
+handle("ohmygame:clear-browser-data", (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame)
+    throw new Error("Invalid browser data source");
+  return browserViews.clearData();
+});
+handle("ohmygame:attach-browser", (event, projectId: unknown, attachment: unknown, layout: unknown, saved: unknown, labels: unknown) => {
+  requirePlayerSource(event.sender, projectId);
+  if (!validRouteId(attachment) || !isBrowserMenuLabels(labels)) throw new Error("Invalid browser attachment");
+  return browserViews.attach(projectId, attachment, mainWindow!, requirePreviewLayout(layout), requireSavedBrowser(saved), labels);
+});
+handle("ohmygame:layout-browser", (event, projectId: unknown, attachment: unknown, layout: unknown) => {
+  requirePlayerSource(event.sender, projectId);
+  if (!validRouteId(attachment)) throw new Error("Invalid browser attachment");
+  browserViews.layout(projectId, attachment, requirePreviewLayout(layout));
+});
+handle("ohmygame:browser-ready", (event, projectId: unknown, attachment: unknown) => {
+  requirePlayerSource(event.sender, projectId);
+  if (!validRouteId(attachment)) throw new Error("Invalid browser attachment");
+  browserViews.ready(projectId, attachment);
+});
+handle("ohmygame:detach-browser", (event, projectId: unknown, attachment: unknown) => {
+  requirePlayerSource(event.sender, projectId);
+  if (!validRouteId(attachment)) throw new Error("Invalid browser attachment");
+  browserViews.detach(projectId, attachment);
+});
+handle("ohmygame:capture-browser", (event, projectId: unknown) => {
+  requirePlayerSource(event.sender, projectId);
+  return browserViews.capture(projectId);
+});
+handle("ohmygame:browser-open", (event, projectId: unknown, url: unknown) => {
+  requirePlayerSource(event.sender, projectId);
+  if (url !== undefined && typeof url !== "string") throw new Error("Invalid browser address");
+  return browserViews.open(projectId, url);
+});
+handle("ohmygame:browser-tab", (event, projectId: unknown, tabId: unknown, action: unknown, value: unknown) => {
+  requirePlayerSource(event.sender, projectId);
+  if (!validRouteId(tabId)) throw new Error("Invalid browser tab");
+  if (action === "navigate") {
+    if (typeof value !== "string") throw new Error("Invalid browser address");
+    return browserViews.navigate(projectId, tabId, value);
+  }
+  if (action === "select") return browserViews.select(projectId, tabId);
+  if (action === "close") return browserViews.close(projectId, tabId);
+  if (action === "back") return browserViews.back(projectId, tabId);
+  if (action === "forward") return browserViews.forward(projectId, tabId);
+  if (action === "reload") return browserViews.reload(projectId, tabId, value === true);
+  throw new Error("Invalid browser action");
+});
 handle("ohmygame:filter-web-game-player", (event, projectId: unknown, filter: unknown) => {
   requirePlayerSource(event.sender, projectId);
   if (filter !== null && !isPreviewColorFilter(filter)) throw new Error("Invalid game filter");
@@ -564,7 +752,7 @@ function publishGameRecording(state: GameRecordingState): void {
 async function saveGameRecording(file: GameRecordingFile): Promise<GameRecordingSaved> {
   if (!daemon) throw new Error("The game service is unavailable.");
   const name = gameRecordingFileName(file.title, new Date(), file.extension);
-  const query = new URLSearchParams({ name, mediaType: file.mediaType, duration: file.duration.toFixed(3) });
+  const query = new URLSearchParams({ name, mediaType: file.mediaType, duration: file.duration.toFixed(3), saved: "true" });
   const response = await fetch(`${daemon.runtime.url}/library/assets/upload?${query}`, {
     method: "POST",
     headers: { authorization: `Bearer ${daemon.runtime.token}`, "content-type": "application/octet-stream" },
@@ -581,6 +769,15 @@ function requirePlayerSource(sender: Electron.WebContents, projectId: unknown): 
   if (!mainWindow || sender !== mainWindow.webContents || !validRouteId(projectId) || !daemon) {
     throw new Error("Invalid game player source");
   }
+}
+
+/** A project's saved tabs, from the panel; only their addresses and titles are used. */
+function requireSavedBrowser(value: unknown): ProjectBrowser {
+  const saved = value as Partial<ProjectBrowser> | null;
+  if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length > 100) throw new Error("Invalid browser tabs");
+  const tabs = saved.tabs.flatMap((tab) => tab && validRouteId(tab.id) && typeof tab.url === "string" && typeof tab.title === "string" && (!tab.url || isBrowserUrl(tab.url))
+    ? [{ id: tab.id, url: tab.url, title: tab.title.slice(0, 500) }] : []);
+  return { tabs, ...(typeof saved.active === "string" ? { active: saved.active } : {}), visits: [] };
 }
 
 function requirePreviewLayout(value: unknown): WebGamePreviewLayout {
@@ -683,6 +880,14 @@ handle("ohmygame:notification-view", (event, value: unknown) => {
   if (view === undefined) throw new Error("Invalid conversation");
   agentNotifications.setView(view);
 });
+handle("ohmygame:notification-result-read", (event, value: unknown) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) {
+    throw new Error("Invalid notification source");
+  }
+  const result = parseAgentResultRead(value);
+  if (!result) throw new Error("Invalid result cursor");
+  agentNotifications.markResultRead(result);
+});
 handle("ohmygame:take-notification-target", (event) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error("Invalid notification source");
   const target = notificationTarget;
@@ -740,18 +945,35 @@ handle("ohmygame:restart-app", (event) => {
   app.quit();
 });
 
-// On macOS, closing the last window keeps the app and its services running
-// until Quit, and clicking the Dock icon opens the main window again.
+handle("ohmygame:background-running", async (event, enabled?: unknown) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame)
+    throw new Error("Invalid background-running source");
+  if (process.platform !== "darwin" && process.platform !== "win32") throw new Error("Background running is unavailable on this platform");
+  if (!backgroundRunning) throw new Error("Background running is not ready");
+  if (enabled === undefined) return backgroundRunning.read();
+  if (typeof enabled !== "boolean") throw new Error("Invalid background-running setting");
+  const value = await backgroundRunning.set(enabled);
+  // A setting change that finishes after Close must not leave an unreachable hidden window.
+  if (!value && mainWindow && !mainWindow.isVisible()) await showMainWindow();
+  return value;
+});
+
+// Settings → General: the GPU falls back to software rendering after repeated crashes.
+handle("ohmygame:gpu-fallback", (event, disabled: unknown) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error("Invalid GPU fallback source");
+  if (disabled === undefined) return { disabled: readGpuFallback(gpuFallbackFile) };
+  if (typeof disabled !== "boolean") throw new Error("Invalid GPU fallback setting");
+  setGpuFallback(gpuFallbackFile, disabled);
+  return { disabled: readGpuFallback(gpuFallbackFile) };
+});
+
+// Keep each platform's default when the opt-in is off. Explicit Quit always shuts down.
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (process.platform !== "darwin" && !backgroundRunning?.enabled) app.quit();
 });
-app.on("activate", () => {
-  if (!daemon || !startupComplete || mainWindow || quitting) return;
-  openMainWindow().catch((error) => {
-    console.error(error);
-    dialog.showErrorBox("OhMyGame could not open a window", error instanceof Error ? error.message : String(error));
-  });
-});
+app.on("activate", () => { void showMainWindow(); });
+app.on("second-instance", () => { void showMainWindow(); });
+app.on("will-quit", () => backgroundRunning?.dispose());
 app.on("before-quit", (event) => {
   if (quitting || !daemon) return;
   event.preventDefault();
@@ -760,7 +982,7 @@ app.on("before-quit", (event) => {
   void prepareShutdown().then(() => {
     if (restartPending) app.relaunch();
     app.quit();
-  }).catch(() => { quitPending = false; restartPending = false; });
+  }).catch(() => { quitPending = false; restartPending = false; void showMainWindow(); });
 });
 
 try {
@@ -770,6 +992,13 @@ try {
   nativeTheme.themeSource = "system";
   const rendererOrigin = useBuiltRenderer ? "null" : new URL(developmentRendererUrl).origin;
   const dataDirectory = process.env.OHMYGAME_DATA_DIR ?? path.join(app.getPath("userData"), "data");
+  if (process.platform === "darwin" || process.platform === "win32") {
+    backgroundRunning = new BackgroundRunning(
+      path.join(dataDirectory, "background-running.json"),
+      process.platform === "win32" ? createBackgroundTray : undefined,
+    );
+    await backgroundRunning.initialize().catch((cause) => console.warn("Background running is unavailable", cause));
+  }
   const systemProxySession = session.fromPartition("ohmygame-system-proxy", { cache: false });
   await systemProxySession.setProxy({ mode: "system" });
   const network = await prepareDesktopNetwork({
@@ -812,7 +1041,6 @@ try {
     // A `file://` page sends the origin `null`, but CSP only matches it as `file:`.
     pluginFrameAncestors: [useBuiltRenderer ? "file:" : rendererOrigin],
     piAgentDirectory: process.env.PI_CODING_AGENT_DIR ?? path.join(app.getPath("userData"), "pi-agent"),
-    bundledPluginsDirectory: app.isPackaged ? path.join(process.resourcesPath, "plugins") : undefined,
     pluginUiDirectory: app.isPackaged ? path.join(process.resourcesPath, "plugin-ui") : undefined,
     preinstalledPluginsDirectory: app.isPackaged
       ? path.join(process.resourcesPath, "preinstalled-plugins")
@@ -840,6 +1068,7 @@ try {
     log: daemonLog,
     logDirectory,
     handlePlaytestRequest: (request, signal) => agentPlaytests.request(request, signal),
+    handleBrowserRequest: (request, signal) => agentBrowser.request(request, signal),
     onState: (state) => {
       mainLog.line(runtimeStateLine(state));
       if (state.status !== "ready") {
@@ -896,8 +1125,21 @@ async function openMainWindow(): Promise<void> {
       window.webContents.on("console-message", (details) => {
         for (const line of rendererConsoleLines(details)) mainLog.line(line);
       });
+      window.webContents.on("did-start-navigation", (_event, _url, inPlace, mainFrame) => {
+        if (mainFrame && !inPlace) browserViews.dispose();
+      });
+      window.webContents.on("render-process-gone", () => browserViews.dispose());
+      // Electron shows no menu of its own, so text could not be copied or a link's address taken.
+      window.webContents.on("context-menu", (_event, params) => {
+        const items = windowContextMenuTemplate(params, menuLabels, {
+          openLink: (url) => void openInBrowser(url),
+          copy: (text) => clipboard.writeText(text),
+        });
+        if (items.length) Menu.buildFromTemplate(items).popup({ window });
+      });
       window.on("show", () => {
         webGamePlayers.synchronize();
+        browserViews.synchronize();
         updateChecks?.onFocus();
       });
       if (process.platform === "win32") {
@@ -912,10 +1154,10 @@ async function openMainWindow(): Promise<void> {
         if (process.platform !== "darwin") window.flashFrame(false);
         agentNotifications.focusChanged();
       });
-      window.on("hide", () => webGamePlayers.synchronize());
-      window.on("minimize", () => webGamePlayers.synchronize());
-      window.on("restore", () => webGamePlayers.synchronize());
-      window.on("resize", () => webGamePlayers.synchronize());
+      window.on("hide", () => { webGamePlayers.synchronize(); browserViews.synchronize(); });
+      window.on("minimize", () => { webGamePlayers.synchronize(); browserViews.synchronize(); });
+      window.on("restore", () => { webGamePlayers.synchronize(); browserViews.synchronize(); });
+      window.on("resize", () => { webGamePlayers.synchronize(); browserViews.synchronize(); });
       const close = new RendererCloseRequest(
         (id) => window.webContents.send("ohmygame:prepare-close", id),
         (id, error) => { if (!window.isDestroyed()) window.webContents.send("ohmygame:cancel-close", id, error); },
@@ -925,6 +1167,12 @@ async function openMainWindow(): Promise<void> {
       window.on("close", (event) => {
         if (quitting || allowClose) return;
         event.preventDefault();
+        if (backgroundRunning?.enabled && !quitPending) {
+          // Hiding keeps the renderer and its workspace alive; do not enter its closing state.
+          window.hide();
+          agentNotifications.focusChanged();
+          return;
+        }
         void close.request().then(() => {
           if (quitPending || quitting || allowClose || window.isDestroyed()) return;
           allowClose = true;
@@ -939,6 +1187,7 @@ async function openMainWindow(): Promise<void> {
           setKeepAwake(false);
         }
         webGamePlayers.close();
+        browserViews.dispose();
         for (const playtest of playtestWindows.values()) {
           void Promise.resolve(playtest).then((window) => window.close(), () => {});
         }

@@ -113,13 +113,18 @@
   cursor: default;
   opacity: 0.5;
 }
+/* Fills the stage, which isn't a flex container, so the state sits in its middle;
+   `safe` keeps a long error's start in view when it outgrows the stage. */
 .preview-status-panel {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  flex: 1;
-  min-width: 0;
+  justify-content: safe center;
+  gap: 4px;
+  padding: 16px;
+  overflow: auto;
 }
 .preview-status-panel .workspace-state {
   flex: initial;
@@ -201,4 +206,28 @@
   .preview-controls > .viewport-menu {
     display: none;
   }
+}
+.preview-status-panel .workspace-state .ui-disclosure,
+.preview-status-panel .workspace-state details {
+  align-self: stretch;
+  text-align: start;
+}
+.preview-status-panel .workspace-state pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.game-start-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+.game-start-error {
+  display: block;
+  margin-top: 6px;
+  color: var(--color-danger);
 }

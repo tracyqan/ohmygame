@@ -2,9 +2,10 @@ import { useReadyRuntimeGeneration } from "./runtime-connection.js";
 import { Check, Copy, Globe2, LoaderCircle, Maximize, Share2 } from "./icons.js";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { CommunityGame } from "../shared/contracts.js";
-import type { CommunityGameStats } from "../shared/publish-v1.js";
+import { gameShareUrl, readableUrl, type CommunityGameStats } from "../shared/publish-v1.js";
 import { CreatorLink, GameGrid, GameGridSkeleton, GameStats } from "./community-game-card.js";
 import { CommunityGameActions } from "./community-game-actions.js";
+import { GameComments } from "./community-comments.js";
 import { CommunitySearch, CommunityToolbar, filterCommunityGames, type CommunityFilters } from "./community-filters.js";
 import { CommunityPage, CommunityState } from "./community-page.js";
 import { GameLoader } from "./community-game-loader.js";
@@ -326,8 +327,9 @@ function GameDetail({ game, relatedGames, actions, onOhMyGame, onPlayerLoad, onS
             }}
             title={game.title}
             // A published game may open the OhMyGame sign-in popup; the desktop app allows only that page.
-            sandbox="allow-forms allow-modals allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
-            allow="autoplay; fullscreen"
+            // It may also save and copy what players make, as it can at its own address.
+            sandbox="allow-downloads allow-forms allow-modals allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+            allow="autoplay; fullscreen; clipboard-write"
           />
         ) : null}
         <GameLoader loading={!playing} />
@@ -361,6 +363,14 @@ function GameDetail({ game, relatedGames, actions, onOhMyGame, onPlayerLoad, onS
 
       {game ? <GameShareDialog game={game} open={sharing} onClose={() => setSharing(false)} /> : null}
 
+      {/* Only listed games take comments; an owner looking at a hidden one sees none. */}
+      {game && game.listingStatus !== "unlisted" ? (
+        <GameComments
+          game={game}
+          onCountChange={commentCount => game.stats && onStatsChange(game.id, { ...game.stats, commentCount })}
+        />
+      ) : null}
+
       {relatedGames.length ? (
         <section className="community-section" aria-label={t("community.moreGames")}>
           <h2>{t("community.moreGames")}</h2>
@@ -380,7 +390,8 @@ function GameShareDialog({ game, open, onClose }: { game: CommunityGame; open: b
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const shareRef = useRef<HTMLDivElement>(null);
-  const data = { title: game.title, text: game.description, url: game.playUrl };
+  const url = gameShareUrl(game);
+  const data = { title: game.title, text: game.description, url };
   const canShare = !window.ohMyGameDesktop && typeof navigator.share === "function"
     && (!navigator.canShare || navigator.canShare(data));
 
@@ -395,7 +406,7 @@ function GameShareDialog({ game, open, onClose }: { game: CommunityGame; open: b
     setCopied(false);
     setError(undefined);
     try {
-      await navigator.clipboard.writeText(game.playUrl);
+      await navigator.clipboard.writeText(url);
       setCopied(true);
     } catch {
       setError(t("community.copyFailed"));
@@ -427,7 +438,7 @@ function GameShareDialog({ game, open, onClose }: { game: CommunityGame; open: b
       <div className="community-share" ref={shareRef}>
         <Input
           readOnly
-          value={game.playUrl}
+          value={readableUrl(url)}
           aria-label={t("community.link")}
           onFocus={(event) => event.currentTarget.select()}
           suffix={(

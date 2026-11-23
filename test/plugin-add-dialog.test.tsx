@@ -14,7 +14,7 @@ const preview: PluginAddPreview = {
   description: "Makes things",
   appWide: false,
   asks: ["network:api.example.com"],
-  adds: { projectTypes: [], panels: ["Board"], commands: ["Open board"], mcpServers: ["API"], modelProviders: [], agents: [], tools: 0, skills: 2 },
+  adds: { projectTypes: [], panels: ["Board"], commands: ["Open board"], mcpServers: ["API"], modelProviders: [], agents: [], tools: 0, skills: 2, instructions: "Read the project first.\nKeep café and 中文 names." },
   settings: true,
   installedVersions: [],
   origin: { type: "npm", package: "@acme/maker", version: "1.0.0", registry: "npmmirror" },
@@ -106,9 +106,10 @@ describe("PluginAddDialog", () => {
     expect(onAdded).not.toHaveBeenCalled();
     const text = dialog().textContent!;
     expect(document.querySelector(".ui-dialog-title")?.textContent).toBe("Add Maker?");
-    for (const shown of ["acme/maker 1.0.0", "@acme/maker", "Connect to these sites", "api.example.com", "PanelBoard", "CommandOpen board", "MCP serviceAPI", "2 skills", "You approve what it asks for", "settings to fill in", "doesn't review"])
+    for (const shown of ["acme/maker 1.0.0", "@acme/maker", "Connect to these sites", "api.example.com", "PanelBoard", "CommandOpen board", "MCP serviceAPI", "2 skills", "Adding it allows what it asks for", "settings to fill in", "doesn't review"])
       expect(text, shown).toContain(shown);
     expect(text).not.toContain("runs its own code");
+    expect(dialog().querySelector(".plugin-instructions")?.textContent).toBe(preview.adds.instructions);
     await submit();
     expect(requests[1]).toEqual({ route: "/plugin-sources/install", body: { source: preview.source, digest: preview.digest } });
     expect(onAdded).toHaveBeenCalledWith("acme/maker");
@@ -118,7 +119,7 @@ describe("PluginAddDialog", () => {
     try {
       await open();
       await act(async () => dialog().querySelector<HTMLButtonElement>('[role="combobox"]')!.click());
-      await act(async () => [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((item) => item.textContent === "Another registry…")!.click());
+      await act(async () => [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((item) => item.textContent === "Another registry")!.click());
       await type(dialog().querySelector<HTMLInputElement>('input[placeholder="@publisher/plugin"]')!, "@acme/maker");
       const address = dialog().querySelector<HTMLInputElement>('input[placeholder="https://registry.example.com"]')!;
       await type(address, "http://registry.example.com");
@@ -151,6 +152,8 @@ describe("PluginAddDialog", () => {
     expect(text).toContain("on in every project it suits once you add it");
     expect(text).toContain("Version 1.0.0 is already installed, with these same contents");
     expect(text).toContain("This replaces version 0.9.0");
+    // The same version again isn't an update.
+    expect(document.querySelector(".ui-dialog-title")?.textContent).toBe("Add Maker?");
   });
 
   it("doesn't change source while one is being read", async () => {
@@ -218,7 +221,7 @@ describe("PluginAddDialog", () => {
       answer = () => Response.json({ ...preview, asks: ["native"], source: { type: "directory", path: "/plugins/maker" }, origin: undefined });
       await open();
       await tab("This computer");
-      await act(async () => button("Choose a folder…").click());
+      await act(async () => button("Choose a folder").click());
       expect(requests[0]!.body).toEqual({ source: { type: "directory", path: "/plugins/maker" } });
       expect(dialog().textContent).toContain("/plugins/maker");
       expect(dialog().querySelector('[role="alert"]')?.textContent).toContain("It runs its own code on this computer");
@@ -256,7 +259,19 @@ describe("PluginAddDialog", () => {
     expect(items).toContain("Keep keys and sign-insNew");
     expect(dialog().querySelector(".plugin-capability-items code.is-new")).toBeNull();
     expect(dialog().textContent).toContain("You'll be asked to allow only what's new.");
-    await act(async () => button("Add plugin").click());
+    expect(document.querySelector(".ui-dialog-title")?.textContent).toBe("Update Maker to 1.1.0?");
+    await act(async () => button("Update").click());
+    expect(onAdded).toHaveBeenCalledWith("acme/maker");
+  });
+
+  it("uses an already-inspected preview without inspecting again", async () => {
+    const preRead: PluginAddPreview = { ...preview, version: "1.1.0", asks: ["network:api.example.com", "secrets"], installedVersions: ["1.0.0"], newAsks: ["secrets"] };
+    await act(async () => root.render(<PluginAddDialog source={preRead.source} preview={preRead} onClose={onClose} onAdded={onAdded} />));
+    expect(requests).toEqual([]);
+    expect(document.querySelector(".ui-dialog-title")?.textContent).toBe("Update Maker to 1.1.0?");
+    expect(dialog().textContent).toContain("You'll be asked to allow only what's new.");
+    await act(async () => button("Update").click());
+    expect(requests).toEqual([{ route: "/plugin-sources/install", body: { source: preRead.source, digest: preRead.digest } }]);
     expect(onAdded).toHaveBeenCalledWith("acme/maker");
   });
 
@@ -274,6 +289,16 @@ describe("PluginAddDialog", () => {
       const link = dialog().querySelector<HTMLAnchorElement>('a[href="https://github.com/acme/maker"]')!;
       expect(link.textContent).toContain("acme/maker");
       expect(dialog().textContent).toContain("Source verified");
+      // From Discover, it passed the index's checks; not a review by people.
+      expect(dialog().textContent).toContain("automated checks");
+      expect(dialog().textContent).not.toContain("doesn't review");
+    });
+
+    it("leaves the review warning off an official plugin", async () => {
+      await openListed({ ...listed, id: "ohmygame/maker" });
+      expect(dialog().textContent).toContain("Source verified");
+      expect(dialog().textContent).not.toContain("automated checks");
+      expect(dialog().textContent).not.toContain("doesn't review");
     });
 
     it("says when the source isn't verified, and closes rather than going back to a form", async () => {

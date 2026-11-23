@@ -29,9 +29,11 @@ export interface PluginAddRow { id: string; kind: string; title: ReactNode }
 export function pluginAddRows(adds: StorePlugin["adds"]): PluginAddRow[] {
   const rows = [
     ...adds.projectTypes.map((title) => ({ kind: t("pluginStore.addsType"), title })),
+    ...(adds.templates ?? []).map((title) => ({ kind: t("pluginStore.addsTemplate"), title })),
     ...adds.panels.map((title) => ({ kind: t("pluginStore.addsPanel"), title })),
     ...adds.commands.map((title) => ({ kind: t("pluginStore.addsCommand"), title })),
     ...adds.mcpServers.map((title) => ({ kind: t("pluginStore.addsMcpServer"), title })),
+    ...(adds.instructions ? [{ kind: t("pluginStore.addsInstructions"), title: <div className="plugin-instructions">{adds.instructions}</div> }] : []),
     ...(adds.hooks ?? []).map((hook) => ({ kind: t("pluginStore.addsHook"), title: hookLabel(hook) })),
     ...adds.modelProviders.map((title) => ({ kind: t("pluginStore.addsModelProvider"), title })),
     ...adds.agents.map((title) => ({ kind: t("pluginStore.addsAgent"), title })),

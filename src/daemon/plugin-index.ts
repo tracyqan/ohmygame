@@ -1,3 +1,4 @@
+import { isPluginSettingsCommand } from "../shared/plugin-settings.js";
 import { createHash, randomUUID } from "node:crypto";
 import { CANVAS_PRESET_MAX_BYTES, canvasPresetIssue } from "../shared/canvas-plugin-nodes.js";
 import { constants } from "node:fs";
@@ -22,9 +23,11 @@ import {
 import { manifestHooks } from "../shared/plugin-hooks.js";
 import {
   agentToolName,
+  PLUGIN_HOST_API_VERSION,
   pluginApiIssue,
   pluginUiIssue,
   toolSchemaIssues,
+  PLUGIN_MEDIA_ADAPTER_MAX_BYTES,
   PLUGIN_SCREENSHOT_MAX_BYTES,
   validatePluginManifest,
   type PluginContributions,
@@ -198,6 +201,7 @@ function localizedKeys(manifest: PluginManifestV2): Set<string> {
     ...(contributes.previewDevices ?? []).map((device) => device.title),
     ...(contributes.previewFilters ?? []).flatMap((filter) => [filter.title, filter.source]),
     ...(contributes.inputMaps ?? []).map((map) => map.title),
+    ...(contributes.browserShortcuts ?? []).map((shortcut) => shortcut.title),
   ];
   const keys = new Set<string>();
   for (const text of texts) {
@@ -247,11 +251,17 @@ function checkPackage(
       ],
     };
   const validated = validatePluginManifest(raw);
-  if (!validated.ok) return validated;
+  const apiIssue = pluginApiIssue(raw);
+  const apiDiagnostic = apiIssue && { path: "/engines/ohmygame-api", ...apiIssue };
+  if (!validated.ok) {
+    // A newer API may define values this host's manifest schema rejects.
+    if (apiDiagnostic?.fix === "update-app")
+      return { ...validated, issues: [apiDiagnostic, ...validated.issues] };
+    return validated;
+  }
   const manifest = validated.manifest;
   const notes = validated.ignored ? { ignored: validated.ignored } : {};
-  const apiIssue = pluginApiIssue(manifest);
-  if (apiIssue) issues.push({ path: "/engines/ohmygame-api", ...apiIssue });
+  if (apiDiagnostic) issues.push(apiDiagnostic);
   const uiIssue = pluginUiIssue(manifest);
   if (uiIssue) issues.push({ path: "/ui/major", ...uiIssue });
   const contributes: PluginContributions = manifest.contributes ?? {};
@@ -276,12 +286,17 @@ function checkPackage(
     file(`/contributes/projectTypes/${index}/icon`, type.icon);
     folder(`/contributes/projectTypes/${index}/template`, type.template);
   });
+  contributes.templates?.forEach((template, index) => folder(`/contributes/templates/${index}/folder`, template.folder));
   contributes.commands?.forEach((command, index) =>
     file(`/contributes/commands/${index}/icon`, command.icon),
   );
-  contributes.providers?.forEach((provider, index) =>
-    file(`/contributes/providers/${index}/icon`, provider.icon),
-  );
+  contributes.providers?.forEach((provider, index) => {
+    file(`/contributes/providers/${index}/icon`, provider.icon);
+    const adapter = provider.media?.adapter, at = `/contributes/providers/${index}/media/adapter`;
+    const bytes = adapter ? files.get(adapter) : undefined;
+    if (adapter && !bytes) issue(at, `${adapter} is not in the package`);
+    else if (bytes && bytes.length > PLUGIN_MEDIA_ADAPTER_MAX_BYTES) issue(at, `${adapter} is larger than ${PLUGIN_MEDIA_ADAPTER_MAX_BYTES / 1024} KB`);
+  });
   contributes.canvasPresets?.forEach((preset, index) => {
     const at = `/contributes/canvasPresets/${index}/board`, bytes = files.get(preset.board);
     if (!bytes) return issue(at, `${preset.board} is not in the package`);
@@ -424,21 +439,23 @@ export function pluginAdds(entry: Pick<PluginIndexEntry, "manifest" | "skills">,
   const hooks = manifestHooks(entry.manifest);
   return {
     projectTypes: (contributes.projectTypes ?? []).map((type) => text(type.title)),
+    ...(contributes.templates ? { templates: contributes.templates.map((template) => text(template.title)) } : {}),
     panels: (contributes.panels ?? []).map((panel) => text(panel.title)),
-    commands: (contributes.commands ?? []).map((command) => text(command.title)),
+    commands: (contributes.commands ?? []).filter((command) => !isPluginSettingsCommand(entry.manifest, command.id)).map((command) => text(command.title)),
     mcpServers: (contributes.mcpServers ?? []).map((server) => text(server.title)),
     modelProviders: (contributes.providers ?? []).map((provider) => text(provider.title)),
     agents: (contributes.agents ?? []).map((agent) => text(agent.title)),
     tools: contributes.tools?.length ?? 0,
     skills: entry.skills.length,
     ...(hooks.length ? { hooks: [...hooks] } : {}),
+    ...(contributes.instructions ? { instructions: contributes.instructions } : {}),
   };
 }
 
-/** Whether a plugin adds only what joins the app itself, model providers and agents, so projects' switches don't reach it. */
+/** Whether a plugin adds only what joins the app itself, model providers, agents and project templates, so projects' switches don't reach it. */
 export function pluginAppOnly(manifest: Pick<PluginManifestV2, "contributes">): boolean {
   const kinds = Object.keys(manifest.contributes ?? {});
-  return kinds.length > 0 && kinds.every((kind) => kind === "providers" || kind === "agents");
+  return kinds.length > 0 && kinds.every((kind) => kind === "providers" || kind === "agents" || kind === "templates");
 }
 
 /** Resolves a manifest string for display: `%key%` in the locale, then `en`. */
@@ -459,7 +476,7 @@ function localeText(table: Record<string, string> | undefined, key: string): str
 
 type ContributionKind = Exclude<
   keyof PluginContributions,
-  "skills" | "settings"
+  "skills" | "settings" | "instructions"
 >;
 type ContributionItem<K extends ContributionKind> = NonNullable<
   PluginContributions[K]
@@ -477,6 +494,11 @@ export interface IndexedContribution<K extends ContributionKind> {
 
 interface IndexFile {
   schema: number;
+  /**
+   * The plugin API that read the manifests. An older app drops the fields it
+   * doesn't know, so a newer one reads the packages again.
+   */
+  api?: string;
   entries: PluginIndexEntry[];
 }
 
@@ -506,7 +528,7 @@ export class PluginIndex {
       ) as IndexFile | undefined;
       this.#entries.clear();
       if (!data || !Array.isArray(data.entries)) return;
-      if (data.schema === PLUGIN_INDEX_SCHEMA_VERSION) {
+      if (data.schema === PLUGIN_INDEX_SCHEMA_VERSION && data.api === PLUGIN_HOST_API_VERSION) {
         for (const entry of data.entries)
           this.#entries.set(key(entry.id, entry.version), entry);
         return;
@@ -634,6 +656,7 @@ export class PluginIndex {
   async #save(): Promise<void> {
     const data: IndexFile = {
       schema: PLUGIN_INDEX_SCHEMA_VERSION,
+      api: PLUGIN_HOST_API_VERSION,
       entries: this.entries(),
     };
     await mkdir(path.dirname(this.file), { recursive: true });

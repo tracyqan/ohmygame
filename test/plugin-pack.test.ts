@@ -10,6 +10,7 @@ import { PLUGIN_TEMPLATE_PARTS, pluginTemplate } from "../src/shared/plugin-temp
 import { checkFolder } from "../scripts/plugin-check.js";
 import { buildPluginPackages } from "../scripts/build-plugin-packages.js";
 import { PLUGIN_HOST_API_VERSION } from "../src/shared/plugin-manifest.js";
+import { apiVersionProblems } from "../scripts/plugin-api-version.js";
 
 const cleanup: string[] = [];
 afterEach(async () => {
@@ -99,15 +100,17 @@ describe("published files", () => {
 
   it("stage into a folder of their own, with project templates' .gitignore back", async () => {
     const root = await folder({
-      ".ohmygame-plugin/plugin.json": JSON.stringify({ id: "acme/maker", version: "1.0.0", engines: { "ohmygame-api": "^2.0.0" }, displayName: "Maker", description: "Makes", contributes: { projectTypes: [{ id: "game", title: "Game", description: "A game", template: "./template", preview: "web" }] } }),
+      ".ohmygame-plugin/plugin.json": JSON.stringify({ id: "acme/maker", version: "1.0.0", engines: { "ohmygame-api": "^2.0.0" }, displayName: "Maker", description: "Makes", contributes: { projectTypes: [{ id: "game", title: "Game", description: "A game", template: "./template", preview: "web" }], templates: [{ id: "studio", title: "Studio", projectType: "general", folder: "./studio" }] } }),
       "template/gitignore": "dist/\n",
       "template/index.html": "",
+      "studio/gitignore": "build/\n",
+      "studio/README.md": "",
       "notes.md.orig": "",
     });
     const target = path.join(root, "..", `${path.basename(root)}-staged`);
     cleanup.push(target);
     await stagePublished(root, target);
-    expect((await readdir(target, { recursive: true })).map((file) => file.split(path.sep).join("/")).sort()).toEqual([".ohmygame-plugin", ".ohmygame-plugin/plugin.json", "template", "template/.gitignore", "template/index.html"]);
+    expect((await readdir(target, { recursive: true })).map((file) => file.split(path.sep).join("/")).sort()).toEqual([".ohmygame-plugin", ".ohmygame-plugin/plugin.json", "studio", "studio/.gitignore", "studio/README.md", "template", "template/.gitignore", "template/index.html"]);
   });
 });
 
@@ -158,6 +161,20 @@ describe("plugin packages for authors", () => {
       expect(JSON.parse(await readFile(path.join("packages", name, "package.json"), "utf8")).version, name).toBe(PLUGIN_HOST_API_VERSION);
       expect(await readFile(path.join("packages", name, "LICENSE"), "utf8"), name).toBe(license);
     }
+  });
+
+  it("raise the plugin API's minor at most once per release, with its row in the guide", async () => {
+    const docs = await readFile("docs/plugins.md", "utf8");
+    expect(apiVersionProblems(PLUGIN_HOST_API_VERSION, PLUGIN_HOST_API_VERSION, docs)).toEqual([]);
+    const table = "| 2.4.0 | a |\n| 2.5.0 | b |\n| 2.6.0 | c |\n| 3.0.0 | d |\n| 2.5.1 | e |";
+    expect(apiVersionProblems("2.4.0", "2.4.0", table)).toEqual([]);
+    expect(apiVersionProblems("2.4.0", "2.5.0", table)).toEqual([]);
+    expect(apiVersionProblems("2.4.0", "3.0.0", table)).toEqual([]);
+    expect(apiVersionProblems("2.4.0", "2.6.0", table)).toEqual([expect.stringContaining("every addition since shares 2.5.0")]);
+    expect(apiVersionProblems("2.5.0", "2.4.0", table)).toEqual([expect.stringContaining("older than 2.5.0")]);
+    expect(apiVersionProblems("2.4.0", "2.5.1", table)).toEqual([expect.stringContaining("the version a release adds is 2.5.0")]);
+    expect(apiVersionProblems("2.4.0", "3.1.0", table)).toEqual([expect.stringContaining("a new format starts at 3.0.0"), expect.stringContaining("no row for 3.1.0")]);
+    expect(apiVersionProblems("2.6.0", "2.7.0", table)).toEqual([expect.stringContaining("no row for 2.7.0")]);
   });
 
   it.skipIf(!npm)("make a plugin, check it and pack it from their built files", { timeout: 60_000 }, async () => {

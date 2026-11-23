@@ -39,7 +39,7 @@ function imageBlob(image: GalleryImage, signal?: AbortSignal): Promise<Blob> {
 }
 
 /** Most clipboards take only PNG, so other images are drawn into one first. */
-async function pngBlob(blob: Blob): Promise<Blob> {
+export async function pngBlob(blob: Blob): Promise<Blob> {
   if (blob.type === "image/png") return blob;
   const bitmap = await createImageBitmap(blob);
   const canvas = document.createElement("canvas");
@@ -105,7 +105,7 @@ function ImagePreview({ image, alt, menu, onClose }: { image: GalleryImage; alt:
       if (event.currentTarget.contains(event.target as Node)) onClose();
     }}>
       <div ref={panel} className="image-preview" role="dialog" aria-modal="true" aria-label={alt} tabIndex={-1}>
-        {url ? <ContextMenu items={menu}><img src={url} alt={alt} /></ContextMenu> : null}
+        {url ? <ContextMenu items={menu} menuClassName="image-preview-menu"><img src={url} alt={alt} /></ContextMenu> : null}
       </div>
     </div>,
     document.body,
