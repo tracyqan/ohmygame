@@ -57,15 +57,15 @@ async function load(projectId: string, seed: boolean): Promise<void> {
   if (!reading || reading.busy) return;
   reading.busy = true;
   try {
-    let file = await readTaskFile(projectId);
-    // The first time the panel opens in a project, a missing file is made with
-    // the format at its top, so the agent has somewhere to write and knows how.
-    if (!file && seed && !reading.seeded) {
+    // The first time the panel opens in a project, the file is asked for even
+    // when one is there: the daemon leaves its content alone but fills a file
+    // that is empty, which is what an older build of this panel left behind.
+    if (seed && !reading.seeded) {
       reading.seeded = true;
       await request(`/projects/${encodeURIComponent(projectId)}/tasks?language=${encodeURIComponent(language)}`, { method: "POST" })
         .catch(() => undefined);
-      file = await readTaskFile(projectId);
     }
+    const file = await readTaskFile(projectId);
     publish(projectId, file
       ? { status: "ready", list: parseTaskFile(file.content ?? ""), truncated: file.truncated === true }
       : { status: "missing" });

@@ -95,17 +95,8 @@ describe("TaskListPanel", () => {
       .toEqual(["本轮交付", "下一层"]);
   });
 
-  it("writes the file with its format the first time the panel opens", async () => {
-    let created = false;
-    readFile.mockImplementation(async () => {
-      if (!created) throw new ApiError("File not found", 400);
-      return content("# Tasks\n\n## Now\n");
-    });
-    writeTasks.mockImplementation(async () => {
-      created = true;
-      return { path: "TASKS.md", written: true };
-    });
-
+  it("asks for the file, with its format, the first time the panel opens", async () => {
+    readFile.mockResolvedValue(content("# Tasks\n\n## Now\n"));
     await render();
 
     expect(writeTasks).toHaveBeenCalledWith("/projects/p1/tasks?language=en", { method: "POST" });
