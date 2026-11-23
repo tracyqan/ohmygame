@@ -1,0 +1,197 @@
+/* The task panel: a read-only view of TASKS.md, dense enough to scan at a glance. */
+.task-list {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--text-md);
+}
+
+.task-list-loading,
+.task-list-notice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px;
+  color: var(--color-text-tertiary);
+}
+
+.task-list-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.task-list-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--color-surface-raised);
+}
+
+.task-list-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-success);
+  transition: width var(--duration-fast, 120ms) ease;
+}
+
+.task-list-count {
+  flex: none;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-list-urgent {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 14%, transparent);
+}
+
+.task-list-file {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+.task-list-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.task-list-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0 10px;
+}
+
+.task-list-section + .task-list-section {
+  margin-top: 4px;
+  border-top: 1px solid var(--color-border);
+}
+
+.task-list-group-title {
+  margin: 0;
+  padding: 10px 14px 4px;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.task-list-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-list-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 6px 14px;
+  line-height: 1.45;
+}
+
+.task-list-row:hover {
+  background: var(--color-hover);
+}
+
+/* Read-only on purpose: the file is the agent's, so the box never takes a click. */
+.task-list-check {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: 4px;
+  color: var(--color-text-tertiary);
+}
+
+.task-list-row.is-done .task-list-check {
+  border-color: var(--color-success);
+  background: var(--color-success);
+  color: var(--color-surface);
+}
+
+.task-list-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-list-row.is-done .task-list-text {
+  color: var(--color-text-tertiary);
+  text-decoration: line-through;
+}
+
+.task-list-priority {
+  flex: none;
+  margin-top: 1px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+.task-list-priority.is-high {
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 14%, transparent);
+}
+
+.task-list-priority.is-medium {
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 16%, transparent);
+}
+
+.task-list-priority.is-low {
+  color: var(--color-text-secondary);
+  background: var(--color-surface-raised);
+}
+
+.task-list-belonging {
+  flex: none;
+  margin-left: auto;
+  padding-left: 10px;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.task-list-none,
+.task-list-note {
+  margin: 0;
+  padding: 10px 14px;
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+}
+
+.task-list-foot {
+  flex: none;
+  padding: 7px 14px;
+  border-top: 1px solid var(--color-border);
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}

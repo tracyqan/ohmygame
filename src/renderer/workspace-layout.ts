@@ -13,7 +13,7 @@ const STORAGE_KEY = "ohmygame-workspace-layout";
 const VERSION = 3;
 const AREAS = ["left", "center", "right", "bottom"] as const;
 
-export type WorkspacePanel = "chat" | "game" | "design" | "code" | "assets" | "story" | "canvas" | "plugin" | "browser";
+export type WorkspacePanel = "chat" | "game" | "design" | "code" | "assets" | "story" | "canvas" | "tasks" | "plugin" | "browser";
 /** What a built-in panel is called, on its tab and wherever it says something about itself. */
 export function panelTitle(panel: WorkspacePanel): string {
   return panel === "code" || panel === "assets" ? t(`workspace.tab.${panel}`) : t(`panels.${panel}`);
@@ -29,11 +29,11 @@ export type Preset = "default" | "art" | "code";
  * Design is the game design document; Canvas is the asset canvas beside it.
  */
 const TYPE_PANELS: Record<ProjectType, readonly WorkspacePanel[]> = {
-  "web-game": ["chat", "game", "design", "canvas", "code", "assets"],
-  general: ["chat", "game", "design", "canvas", "code", "assets"],
-  "godot-game": ["chat", "game", "design", "canvas", "code", "assets"],
-  "interactive-story": ["chat", "story", "design", "canvas", "code", "assets"],
-  "asset-canvas": ["chat", "canvas", "code"],
+  "web-game": ["chat", "game", "design", "canvas", "tasks", "code", "assets"],
+  general: ["chat", "game", "design", "canvas", "tasks", "code", "assets"],
+  "godot-game": ["chat", "game", "design", "canvas", "tasks", "code", "assets"],
+  "interactive-story": ["chat", "story", "design", "canvas", "tasks", "code", "assets"],
+  "asset-canvas": ["chat", "canvas", "tasks", "code"],
   // A plugin workspace: its Overview, then its files.
   plugin: ["chat", "plugin", "code"],
 };
@@ -54,7 +54,7 @@ function browserAvailable(): boolean {
 }
 
 /** Panels every project offers but none opens until the person does, from a + menu or the agent. */
-const OPENED_ON_REQUEST: ReadonlySet<PanelId> = new Set<PanelId>(["browser"]);
+const OPENED_ON_REQUEST: ReadonlySet<PanelId> = new Set<PanelId>(["browser", "tasks"]);
 
 /**
  * Whether the person can add the Game panel to a project that doesn't offer

@@ -16,6 +16,7 @@ import {
   GalleryWide,
   Gamepad2,
   Layers3,
+  ClipboardList,
   LayoutGrid,
   Settings,
   RefreshCw,
@@ -177,6 +178,8 @@ import { openPluginWorkspace } from "./plugin-builder-navigation.js";
 import { useCommands, useLeaveGuard } from "./command-menu.js";
 import type { IconComponent } from "./icons.js";
 import { BrowserPanel, type BrowserOpenRequest } from "./browser-panel.js";
+import { TaskListPanel } from "./task-list-panel.js";
+import { useTaskRemaining } from "./task-list-data.js";
 import type { AppNavigationTarget } from "./routes.js";
 import { language, t } from "./i18n.js";
 
@@ -251,6 +254,7 @@ const PANEL_ICONS: Record<WorkspacePanel, IconComponent> = {
   assets: Layers3,
   story: Book,
   canvas: GalleryWide,
+  tasks: ClipboardList,
   plugin: Package,
   browser: Globe2,
 };
@@ -337,6 +341,13 @@ export function ProjectShell({
   const layout = state.project && current ? fitLayout(current, offered, presetLayout("default", offered, homes)) : undefined;
   const visible = layout ? visiblePanels(layout, new Set(offered)) : [];
   const chatShown = !layout || visible.includes("chat");
+  // The task panel reads the project's file, so it only starts once the person
+  // opens it, and stays mounted after that to keep the tab's count current.
+  const tasksVisible = visible.includes("tasks");
+  const shownProjectId = state.project?.id;
+  const [tasksOpenedIn, setTasksOpenedIn] = useState<string>();
+  useEffect(() => { if (tasksVisible && shownProjectId) setTasksOpenedIn(shownProjectId); }, [tasksVisible, shownProjectId]);
+  const taskRemaining = useTaskRemaining(state.project?.id);
   const [nodes] = useState(() => Object.fromEntries(Object.keys(PANEL_ICONS).map((id) => [id, createPanelNodes()])) as Record<WorkspacePanel, PanelNodes>);
   // A plugin page gets its nodes once its panel is first placed, and keeps
   // them, so moving or closing the panel never reloads the page.
@@ -2016,6 +2027,7 @@ export function ProjectShell({
         // A draft's panel names no plugin, but its page is a plugin page all the same.
         const target = pluginPanels.has(id) ? pluginNodes.get(id) : nodes[id as WorkspacePanel];
         return { id, title, icon: <Icon size={14} />, home: homeOf(id, homes), ...(source ? { source } : {}),
+          ...(id === "tasks" && taskRemaining ? { badge: taskRemaining } : {}),
           content: target ? <PanelMount nodes={target} /> : null };
       })}
       overlay={project && !chatShown ? <FloatingChat
@@ -2194,6 +2206,9 @@ export function ProjectShell({
       {project && browserOpenedIn === project.id && window.ohMyGameDesktop?.browser ? createPortal(<ErrorBoundary label={panelTitle("browser")} resetKey={project.id}>
         <BrowserPanel key={project.id} bridge={window.ohMyGameDesktop.browser} projectId={project.id} visible={visible.includes("browser")} pluginsRevision={capabilitiesRevision} openRequests={browserOpenRequests.filter((request) => request.projectId === project.id)} onOpened={(opened) => setBrowserOpenRequests((requests) => requests.filter((request) => request !== opened))} />
       </ErrorBoundary>, nodes.browser.body) : null}
+      {project && tasksOpenedIn === project.id ? createPortal(<ErrorBoundary label={panelTitle("tasks")} resetKey={project.id}>
+        <TaskListPanel projectId={project.id} />
+      </ErrorBoundary>, nodes.tasks.body) : null}
       {project && workspace && workspaceTop ? workspace.render({
         busy: agentBusy, revision: workspaceRevision, ask: requestPrompt, openFile: openWorkspaceFile, top: workspaceTop, panel: nodes.plugin,
       }) : null}

@@ -6,9 +6,9 @@ import { closePanel, createPanelNodes, movePanel, PanelLayout, PanelMount, showP
 import { fitLayout, gamePanelAddable, mergeLayout, openingLayout, panelsOf, presetLayout, presetsFor, saveLayout, type WorkspacePanel } from "../src/renderer/workspace-layout.js";
 
 const tabs = (layout: Layout) => Object.fromEntries(Object.entries(layout).map(([area, value]) => [area, value.panels.map((id) => id === value.active ? `*${id}` : id).join(",")]));
-const GAME: WorkspacePanel[] = ["chat", "game", "design", "canvas", "code", "assets"];
-const GENERAL: WorkspacePanel[] = ["chat", "design", "canvas", "code", "assets"];
-const STORY: WorkspacePanel[] = ["chat", "story", "design", "canvas", "code", "assets"];
+const GAME: WorkspacePanel[] = ["chat", "game", "design", "canvas", "tasks", "code", "assets"];
+const GENERAL: WorkspacePanel[] = ["chat", "design", "canvas", "tasks", "code", "assets"];
+const STORY: WorkspacePanel[] = ["chat", "story", "design", "canvas", "tasks", "code", "assets"];
 
 beforeEach(() => localStorage.clear());
 
@@ -39,7 +39,7 @@ describe("workspace layouts", () => {
     expect(presetsFor(["chat", "canvas"])).toEqual(["default"]);
     // An asset canvas opens on its canvas, with its files in a Code panel.
     const canvas = panelsOf({ type: "asset-canvas" });
-    expect(canvas).toEqual(["chat", "canvas", "code"]);
+    expect(canvas).toEqual(["chat", "canvas", "tasks", "code"]);
     expect(tabs(presetLayout("default", canvas)).center).toBe("*canvas,code");
     // Art brings the canvas forward, not the design document.
     expect(tabs(presetLayout("art", GAME)).center).toBe("*canvas,game,design,code,assets");
