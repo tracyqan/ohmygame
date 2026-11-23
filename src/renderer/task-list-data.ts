@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { ApiError, createWorkspaceEntry, getWorkspaceFile } from "./api.js";
+import { ApiError, getWorkspaceFile, request } from "./api.js";
+import { language } from "./i18n.js";
 import { TASK_FILE, parseTaskFile, remainingOf, type TaskList } from "./task-file.js";
 
 /**
@@ -57,11 +58,12 @@ async function load(projectId: string, seed: boolean): Promise<void> {
   reading.busy = true;
   try {
     let file = await readTaskFile(projectId);
-    // The first time the panel opens in a project, a missing file is made so
-    // there is somewhere for the agent to write, with no dialog to click through.
+    // The first time the panel opens in a project, a missing file is made with
+    // the format at its top, so the agent has somewhere to write and knows how.
     if (!file && seed && !reading.seeded) {
       reading.seeded = true;
-      await createWorkspaceEntry(projectId, "", TASK_FILE, "file").catch(() => undefined);
+      await request(`/projects/${encodeURIComponent(projectId)}/tasks?language=${encodeURIComponent(language)}`, { method: "POST" })
+        .catch(() => undefined);
       file = await readTaskFile(projectId);
     }
     publish(projectId, file

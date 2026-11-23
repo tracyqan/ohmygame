@@ -1733,7 +1733,7 @@ const en = {
     noMatch: "No tasks match.",
     truncated: "The file is long, so only its start is shown.",
     emptyTitle: "No tasks yet",
-    emptyBody: "Ask the agent to write the plan into TASKS.md, one task per line: - [ ] Add sign-in !high",
+    emptyBody: "TASKS.md is ready, with the format at its top. Ask the agent to add the plan.",
     missingTitle: "TASKS.md is gone",
     missingBody: "The file was deleted or renamed. Ask the agent to create it again.",
     errorTitle: "TASKS.md cannot be read",

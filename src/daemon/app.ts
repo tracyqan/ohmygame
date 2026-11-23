@@ -84,6 +84,7 @@ import { resolveCanvasTextReferences } from "./canvas-text-references.js";
 import type { CanvasDocumentGenerationRequest, CanvasDocumentDetail } from "../shared/canvas-document.js";
 import type { CanvasTableDetail, CanvasTableGenerationRequest } from "../shared/canvas-table.js";
 import { registerCanvasRoutes } from "./canvas-routes.js";
+import { registerTaskRoutes } from "./task-routes.js";
 import { canvasPluginRunner } from "./canvas-plugin-runner.js";
 import { registerAgentRuntimeRoutes } from "./agent-runtime-routes.js";
 import { ASSET_NAME_BODY_SCHEMA, readLibraryFile, registerLibraryRoutes } from "./library-routes.js";
@@ -1620,6 +1621,7 @@ export function createApp(options: AppOptions = {}) {
   }
   projectWrites.install(app);
   const canvasStore = registerCanvasRoutes(app, { projects, library, tools, mediaMigrations, audio: options.audioGenerator ?? providerAudio, plugins: canvasPluginRunner({ native: pluginServices.native, library }) });
+  registerTaskRoutes(app, { projects });
   registerConnectionRoutes(app, { connections, invalidate: invalidatePluginSessions });
   const pluginSetup = new PluginSetupManager(dataDirectory, piAgentDirectory, pluginMcpHost, pluginServices, invalidatePluginSessions, {
     create: (name, workspacePath) => projects.create(name, "plugin", workspacePath),

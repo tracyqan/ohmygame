@@ -1714,7 +1714,7 @@ const zhCN: typeof en = {
     noMatch: "没有符合条件的任务。",
     truncated: "文件太长，只显示了开头部分。",
     emptyTitle: "还没有任务",
-    emptyBody: "让 agent 把计划写进 TASKS.md，一行一个，例如：- [ ] 接入登录 !高",
+    emptyBody: "TASKS.md 已建好，格式写在文件开头。让 agent 把计划填进去。",
     missingTitle: "TASKS.md 不在了",
     missingBody: "文件被删除或改名了。让 agent 重新建一个。",
     errorTitle: "读不了 TASKS.md",

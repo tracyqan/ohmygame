@@ -6,12 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceFileContent } from "../src/shared/contracts.js";
 
 const readFile = vi.fn<(projectId: string, filePath: string) => Promise<WorkspaceFileContent>>();
-const createEntry = vi.fn(async (_projectId: string, _parent: string, name: string) => ({ path: name }));
+const writeTasks = vi.fn(async (_path: string) => ({ path: "TASKS.md", written: true }));
 
 vi.doMock(path.resolve("src/renderer/api.ts"), async (original) => ({
   ...(await original<typeof import("../src/renderer/api.js")>()),
   getWorkspaceFile: readFile,
-  createWorkspaceEntry: createEntry,
+  request: writeTasks,
 }));
 
 const { TaskListPanel } = await import("../src/renderer/task-list-panel.js");
@@ -95,20 +95,20 @@ describe("TaskListPanel", () => {
       .toEqual(["本轮交付", "下一层"]);
   });
 
-  it("makes an empty file the first time the panel opens, then says how to fill it", async () => {
+  it("writes the file with its format the first time the panel opens", async () => {
     let created = false;
     readFile.mockImplementation(async () => {
       if (!created) throw new ApiError("File not found", 400);
-      return content("");
+      return content("# Tasks\n\n## Now\n");
     });
-    createEntry.mockImplementation(async () => {
+    writeTasks.mockImplementation(async () => {
       created = true;
-      return { path: "TASKS.md" };
+      return { path: "TASKS.md", written: true };
     });
 
     await render();
 
-    expect(createEntry).toHaveBeenCalledWith("p1", "", "TASKS.md", "file");
+    expect(writeTasks).toHaveBeenCalledWith("/projects/p1/tasks?language=en", { method: "POST" });
     expect(container.textContent).toContain("No tasks yet");
   });
 

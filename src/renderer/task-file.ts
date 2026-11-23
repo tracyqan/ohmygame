@@ -5,7 +5,7 @@
  */
 
 /** At the workspace root, where any agent finds it without being told, and git tracks it. */
-export const TASK_FILE = "TASKS.md";
+export { TASK_FILE } from "../shared/task-file.js";
 
 export type TaskPriority = "high" | "medium" | "low";
 
