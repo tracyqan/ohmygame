@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Check, ClipboardList, LoaderCircle, TriangleAlert } from "./icons.js";
 import { Button, Empty, SegmentedControl } from "./ui/index.js";
 import { t } from "./i18n.js";
@@ -6,7 +6,7 @@ import { sortedByPriority, type ProjectTask } from "./task-file.js";
 import { refreshTaskList, useTaskList } from "./task-list-data.js";
 import "./task-list-panel.css";
 
-type Filter = "open" | "all" | "done";
+type Filter = "open" | "deciding" | "all" | "done";
 type Order = "priority" | "file";
 
 /**
@@ -21,7 +21,10 @@ export function TaskListPanel({ projectId }: { projectId: string }) {
 
   const list = state.status === "ready" ? state.list : undefined;
   const kept = useMemo(() => {
-    const keep = (task: ProjectTask) => filter === "all" || (filter === "done" ? task.done : !task.done);
+    // A task waiting on a decision is not open work: nobody can start it until
+    // the person answers, so the two never count the same task.
+    const keep = (task: ProjectTask) => filter === "all"
+      || (filter === "done" ? task.done : filter === "deciding" ? task.deciding && !task.done : !task.done && !task.deciding);
     if (!list) return [];
     return order === "priority"
       ? [{ title: "", tasks: sortedByPriority(list.tasks).filter(keep) }]
@@ -29,6 +32,10 @@ export function TaskListPanel({ projectId }: { projectId: string }) {
         .map((group) => ({ title: group.title, tasks: group.tasks.filter(keep) }))
         .filter((group) => group.tasks.length > 0);
   }, [list, filter, order]);
+
+  // The filter for decisions disappears once there are none left to look at.
+  const decisions = list?.deciding ?? 0;
+  useEffect(() => { if (filter === "deciding" && !decisions) setFilter("open"); }, [filter, decisions]);
 
   if (state.status === "loading") return <div className="task-list-loading"><LoaderCircle className="spin" size={16} /></div>;
 
@@ -47,8 +54,8 @@ export function TaskListPanel({ projectId }: { projectId: string }) {
     <Empty icon={<ClipboardList size={20} />} title={t("taskList.emptyTitle")} description={t("taskList.emptyBody")} />
   </div>;
 
-  const open = tasks.total - tasks.done;
-  const urgent = tasks.tasks.filter((task) => !task.done && task.priority === "high").length;
+  const open = tasks.total - tasks.done - tasks.deciding;
+  const urgent = tasks.tasks.filter((task) => !task.done && !task.deciding && task.priority === "high").length;
   const percent = tasks.total ? Math.round((tasks.done / tasks.total) * 100) : 0;
 
   return (
@@ -59,6 +66,7 @@ export function TaskListPanel({ projectId }: { projectId: string }) {
           <span style={{ width: `${percent}%` }} />
         </div>
         <span className="task-list-count">{tasks.done} / {tasks.total}</span>
+        {tasks.deciding ? <span className="task-list-deciding-count">{t("taskList.filterDeciding", { count: tasks.deciding })}</span> : null}
         {urgent ? <span className="task-list-urgent">{t("taskList.high", { count: urgent })}</span> : null}
         <span className="task-list-file" title={t("taskList.fileHint")}>TASKS.md</span>
       </header>
@@ -66,6 +74,7 @@ export function TaskListPanel({ projectId }: { projectId: string }) {
       <div className="task-list-controls">
         <SegmentedControl label={t("taskList.filterLabel")} size="sm" value={filter} onChange={setFilter} options={[
           { value: "open", label: t("taskList.filterOpen", { count: open }) },
+          ...(tasks.deciding ? [{ value: "deciding" as const, label: t("taskList.filterDeciding", { count: tasks.deciding }) }] : []),
           { value: "all", label: t("taskList.filterAll", { count: tasks.total }) },
           { value: "done", label: t("taskList.filterDone", { count: tasks.done }) },
         ]} />
@@ -82,11 +91,12 @@ export function TaskListPanel({ projectId }: { projectId: string }) {
             {group.title ? <h3 className="task-list-group-title">{group.title}</h3> : null}
             <ul className="task-list-rows">
               {group.tasks.map((task) => (
-                <li key={task.line} className={`task-list-row${task.done ? " is-done" : ""}`}>
+                <li key={task.line} className={`task-list-row${task.done ? " is-done" : ""}${task.deciding ? " is-deciding" : ""}`}>
                   <span className="task-list-check" role="checkbox" aria-checked={task.done} aria-disabled="true" aria-label={task.text}>
-                    {task.done ? <Check size={10} /> : null}
+                    {task.done ? <Check size={10} /> : task.deciding ? <span className="task-list-decision-mark">!</span> : null}
                   </span>
                   <span className="task-list-text">{task.text}</span>
+                  {task.deciding ? <span className="task-list-decision">{t("taskList.deciding")}</span> : null}
                   {task.priority ? <span className={`task-list-priority is-${task.priority}`}>{t(`taskList.priority.${task.priority}`)}</span> : null}
                   {order === "priority" && task.group ? <span className="task-list-belonging">{task.group}</span> : null}
                 </li>

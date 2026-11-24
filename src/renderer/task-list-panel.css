@@ -59,6 +59,15 @@
   background: color-mix(in srgb, var(--color-danger) 14%, transparent);
 }
 
+.task-list-deciding-count {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 16%, transparent);
+}
+
 .task-list-file {
   flex: none;
   padding: 1px 6px;
@@ -134,6 +143,29 @@
   border-color: var(--color-success);
   background: var(--color-success);
   color: var(--color-surface);
+}
+
+/* Waiting on the person: dashed, so it never reads as work in progress. */
+.task-list-row.is-deciding .task-list-check {
+  border-style: dashed;
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+
+.task-list-decision-mark {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.task-list-decision {
+  flex: none;
+  margin-top: 1px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 16%, transparent);
 }
 
 .task-list-text {

@@ -1706,6 +1706,8 @@ const zhCN: typeof en = {
     fileHint: "项目根目录的 TASKS.md，由 agent 维护",
     filterLabel: "按状态筛选任务",
     filterOpen: "未完成 {{count}}",
+    filterDeciding: "待拍板 {{count}}",
+    deciding: "待拍板",
     filterAll: "全部 {{count}}",
     filterDone: "已完成 {{count}}",
     orderLabel: "任务排序方式",

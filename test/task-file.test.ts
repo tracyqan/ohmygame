@@ -52,6 +52,16 @@ describe("parseTaskFile", () => {
   it("reads nothing from text without checkboxes", () => {
     expect(parseTaskFile("## 只是笔记\n\n随便写点什么。").total).toBe(0);
   });
+
+  it("reads a task waiting on a decision, which no one can start", () => {
+    const list = parseTaskFile("## 待拍板\n\n- [!] 数量账谁说了算 !高\n- [ ] 普通任务\n- [x] 已做");
+    expect(list.tasks.map((task) => task.deciding)).toEqual([true, false, false]);
+    expect(list.deciding).toBe(1);
+    expect(list.done).toBe(1);
+    expect(list.total).toBe(3);
+    // It is not done, and not open work either: the counts never overlap.
+    expect(list.total - list.done - list.deciding).toBe(1);
+  });
 });
 
 describe("sortedByPriority", () => {

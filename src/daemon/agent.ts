@@ -19,6 +19,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createTrackedWriteTool, fileChangeMetadata } from "./file-line-changes.js";
 import { readWorkspaceNotice } from "./workspace-notice.js";
+import { isUpdatePlanTool, planFromToolResult } from "./plan-tool.js";
 import type { PromptSource, AgentContextUsage, AgentMessagePhase, AgentReasoningLevel, AgentStatus, CheckpointChangeItem, ConversationAgentState, ConversationAttachment, PendingPrompt, PlanMode, PlanSessionState, PlanState, PluginMention, ProjectAgentActivity, ProjectState, PromptImage, PromptReference, QuestionnaireAnswer, QuestionnaireQuestion, QuestionnaireInput, QuestionnaireResponse, QuestionnaireResult, ResponsesTransportMode, ThreadItem, ThreadItemError, ToolArtifact, TurnChanges } from "../shared/contracts.js";
 import { hasPluginMentionToken, parsePluginMentions, serializePluginMentions } from "../shared/plugins.js";
 import type { RuntimeEventBus } from "../shared/events.js";
@@ -302,7 +303,7 @@ export function conversationItems(entries: readonly SessionEntry[], markInterrup
             ...(message.stopReason === "error" ? { error: assistantMessageError(message) } : {}),
           });
         } else if (content.type === "toolCall") {
-          if (content.name === "update_plan") {
+          if (isUpdatePlanTool(content.name)) {
             planCalls.add(content.id);
             continue;
           }
@@ -369,7 +370,7 @@ export function conversationItems(entries: readonly SessionEntry[], markInterrup
       }
       if (planCalls.has(message.toolCallId)) {
         if (message.isError) continue;
-        const plan = toolPlan(message);
+        const plan = planFromToolResult(message);
         if (plan && turnId) {
           const item: ThreadItem = { id: `${turnId}:plan`, turnId, type: "plan", plan, timestamp };
           const index = items.findIndex((candidate) => candidate.id === item.id);
@@ -2173,7 +2174,7 @@ export class AgentManager {
     } else if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_start") {
       const contentIndex = event.assistantMessageEvent.contentIndex;
       const toolCall = partialToolCall(event.assistantMessageEvent.partial, contentIndex);
-      if (!toolCall?.name || toolCall.name === "update_plan" || toolCall.name === "questionnaire") return;
+      if (!toolCall?.name || isUpdatePlanTool(toolCall.name) || toolCall.name === "questionnaire") return;
       const itemId = `${active.turnId}:tool:${active.assistantSequence++}`;
       const toolCallId = toolCall.id || `${active.turnId}:preparing:${contentIndex}`;
       active.preparingToolItemIds.set(contentIndex, itemId);
@@ -2185,7 +2186,7 @@ export class AgentManager {
         active.preparingToolItemIds.delete(contentIndex);
         return;
       }
-      if (toolCall.name === "update_plan") {
+      if (isUpdatePlanTool(toolCall.name)) {
         active.preparingToolItemIds.delete(contentIndex);
         return;
       }
@@ -2318,13 +2319,13 @@ export class AgentManager {
         ...(error ? { error: normalizeAgentError(error) } : {}),
       });
     } else if (event.type === "tool_execution_start") {
-      if (event.toolName === "update_plan" || event.toolName === "questionnaire") return;
+      if (isUpdatePlanTool(event.toolName) || event.toolName === "questionnaire") return;
       const itemId = active.toolItemIds.get(event.toolCallId) ?? `${active.turnId}:tool:${event.toolCallId}`;
       active.toolItemIds.set(event.toolCallId, itemId);
       const args = toolArguments(event.toolName, event.args);
       this.#updateItem(projectId, active, toolThreadItem(active.turnId, itemId, event.toolCallId, event.toolName, args, "inProgress"));
     } else if (event.type === "tool_execution_update") {
-      if (event.toolName === "update_plan" || event.toolName === "questionnaire") return;
+      if (isUpdatePlanTool(event.toolName) || event.toolName === "questionnaire") return;
       const result = toolOutput(event.partialResult);
       const itemId = active.toolItemIds.get(event.toolCallId) ?? `${active.turnId}:tool:${event.toolCallId}`;
       const item = active.items.get(itemId);
@@ -2333,8 +2334,8 @@ export class AgentManager {
       }
     } else if (event.type === "tool_execution_end") {
       if (event.toolName === "questionnaire") return;
-      if (event.toolName === "update_plan") {
-        const plan = toolPlan(event.result);
+      if (isUpdatePlanTool(event.toolName)) {
+        const plan = planFromToolResult(event.result);
         if (!event.isError && plan) {
           active.plan = plan;
           if (active.mode === "planning" || active.mode === "executing") {
@@ -3102,26 +3103,6 @@ function toolArtifact(result: unknown): ToolArtifact | undefined {
     return { type: "video", path: value.path, mediaType: value.mediaType };
   }
   return undefined;
-}
-
-function toolPlan(result: unknown): PlanState | undefined {
-  const details = result && typeof result === "object" && "details" in result ? (result as { details?: unknown }).details : undefined;
-  const value = details && typeof details === "object" && "plan" in details ? (details as { plan?: unknown }).plan : undefined;
-  if (!value || typeof value !== "object" || !Array.isArray((value as { steps?: unknown }).steps)) return undefined;
-  const candidate = value as { explanation?: unknown; steps: unknown[] };
-  const steps: PlanState["steps"] = candidate.steps.flatMap((step) => {
-    if (!step || typeof step !== "object") return [];
-    const item = step as { step?: unknown; status?: unknown };
-    if (typeof item.step !== "string" || !item.step.trim()) return [];
-    const status = item.status;
-    if (status !== "pending" && status !== "in_progress" && status !== "completed") return [];
-    return [{ step: item.step, status }];
-  });
-  if (steps.length !== candidate.steps.length || steps.length === 0) return undefined;
-  return {
-    ...(typeof candidate.explanation === "string" && candidate.explanation ? { explanation: candidate.explanation } : {}),
-    steps,
-  };
 }
 
 function stringify(value: unknown): string {

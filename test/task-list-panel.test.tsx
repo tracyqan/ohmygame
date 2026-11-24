@@ -103,6 +103,21 @@ describe("TaskListPanel", () => {
     expect(container.textContent).toContain("No tasks yet");
   });
 
+  it("shows a task waiting on a decision as its own state", async () => {
+    readFile.mockResolvedValue(content(`## 待拍板\n\n- [!] 数量账谁说了算 !高\n\n## 本轮\n\n- [ ] 照旧做\n`));
+    await render();
+
+    // It is not in the open list, and the header counts it separately.
+    expect(texts()).toEqual(["照旧做"]);
+    expect(container.querySelector(".task-list-deciding-count")?.textContent).toBe("Decisions 1");
+
+    await act(async () => radio("Decisions").click());
+    expect(texts()).toEqual(["数量账谁说了算"]);
+    expect(rows()[0].querySelector(".task-list-decision")?.textContent).toBe("Decision");
+    // Its checkbox says "not done", which it is: nobody has decided yet.
+    expect(rows()[0].querySelector(".task-list-check")?.getAttribute("aria-checked")).toBe("false");
+  });
+
   it("says why it cannot read the file instead of showing an empty list", async () => {
     readFile.mockRejectedValue(new ApiError("The disk is not ready", 500));
     await render();

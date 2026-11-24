@@ -13,6 +13,8 @@ export interface ProjectTask {
   /** What it says, without its marks. */
   text: string;
   done: boolean;
+  /** `- [!]`: waiting on a decision from the person, so nobody writes code yet. */
+  deciding: boolean;
   priority?: TaskPriority;
   /** The `##` heading above it; empty before the first one. */
   group: string;
@@ -31,11 +33,12 @@ export interface TaskList {
   /** Every task, in file order. */
   tasks: ProjectTask[];
   done: number;
+  deciding: number;
   total: number;
 }
 
-/** `- [ ] text`, `* [x] text`, indented under a heading. */
-const TASK_LINE = /^\s*[-*+]\s+\[([ xX])\]\s+(.*)$/;
+/** `- [ ]` open, `- [x]` done, `- [!]` waiting on a decision, indented under a heading. */
+const TASK_LINE = /^\s*[-*+]\s+\[([ xX!])\]\s+(.*)$/;
 /** A heading groups the tasks under it; `#` alone is the file's own title. */
 const HEADING = /^\s*#{2,6}\s+(.+?)\s*#*\s*$/;
 /** The marks that name a priority, longest first so `!high` is not read as `!h`. */
@@ -92,7 +95,8 @@ export function parseTaskFile(markdown: string): TaskList {
     if (!match) continue;
     const { text, priority } = readMarks(match[2]);
     if (!text) continue;
-    const task: ProjectTask = { text, done: match[1] !== " ", priority, group: heading, line };
+    const mark = match[1];
+    const task: ProjectTask = { text, done: mark === "x" || mark === "X", deciding: mark === "!", priority, group: heading, line };
     if (!group) {
       group = { title: heading, tasks: [] };
       groups.push(group);
@@ -100,7 +104,13 @@ export function parseTaskFile(markdown: string): TaskList {
     group.tasks.push(task);
     tasks.push(task);
   }
-  return { groups, tasks, done: tasks.filter((task) => task.done).length, total: tasks.length };
+  return {
+    groups,
+    tasks,
+    done: tasks.filter((task) => task.done).length,
+    deciding: tasks.filter((task) => task.deciding).length,
+    total: tasks.length,
+  };
 }
 
 /** The same tasks from the highest priority down, keeping file order within a level. */

@@ -1725,6 +1725,8 @@ const en = {
     fileHint: "TASKS.md at the project root, kept by the agent",
     filterLabel: "Filter tasks by state",
     filterOpen: "Open {{count}}",
+    filterDeciding: "Decisions {{count}}",
+    deciding: "Decision",
     filterAll: "All {{count}}",
     filterDone: "Done {{count}}",
     orderLabel: "Order the tasks",

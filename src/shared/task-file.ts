@@ -9,7 +9,7 @@ export const TASK_FILE = "TASKS.md";
 const TEMPLATES = {
   en: `# Tasks
 
-> One task per line: \`- [ ]\` open, \`- [x]\` done.
+> One task per line: \`- [ ]\` open, \`- [x]\` done, \`- [!]\` waiting on a decision from the person.
 > Priority goes at the end of the line: \`!high\`, \`!medium\` or \`!low\`.
 > A \`##\` line starts a group. The agent keeps this file; OhMyGame's Tasks panel only reads it.
 
@@ -19,7 +19,7 @@ const TEMPLATES = {
 `,
   "zh-CN": `# 任务清单
 
-> 一行一个任务：\`- [ ]\` 未完成，\`- [x]\` 已完成。
+> 一行一个任务：\`- [ ]\` 未完成，\`- [x]\` 已完成，\`- [!]\` 待拍板（等用户裁定，先不动代码）。
 > 优先级写在行尾：\`!高\`、\`!中\`、\`!低\`（也认 \`!high\`、\`!medium\`、\`!low\`）。
 > 以 \`##\` 开头的一行是分组。这个文件由 agent 维护，OhMyGame 的任务清单面板只读它。
 
