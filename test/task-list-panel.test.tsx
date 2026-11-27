@@ -126,4 +126,46 @@ describe("TaskListPanel", () => {
     expect(container.textContent).toContain("The disk is not ready");
     expect(rows()).toHaveLength(0);
   });
+
+  it("stops reading once the project itself is gone", async () => {
+    vi.useFakeTimers();
+    readFile.mockRejectedValue(new ApiError("Project not found", 404));
+    await render();
+
+    expect(container.textContent).toContain("This project is gone");
+    // Nothing to retry: the project cannot come back while this window is open.
+    expect(container.querySelector("button")).toBeNull();
+
+    await act(async () => { vi.advanceTimersByTime(20_000); });
+    expect(readFile).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("stops polling when the panel closes", async () => {
+    vi.useFakeTimers();
+    readFile.mockResolvedValue(content(FILE));
+    await render();
+    expect(readFile).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+
+    await act(async () => { vi.advanceTimersByTime(20_000); });
+    expect(readFile).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("slows the poll down while reads keep failing", async () => {
+    vi.useFakeTimers();
+    readFile.mockRejectedValue(new ApiError("The disk is not ready", 500));
+    await render();
+
+    // Each tick is its own act, so the rejected read settles before the next one.
+    // Three fails (open, 4s, 8s); from 12s on the 30s backoff holds the poll back.
+    for (let tick = 0; tick < 5; tick += 1) {
+      await act(async () => { vi.advanceTimersByTime(4_000); });
+    }
+    expect(readFile).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
 });

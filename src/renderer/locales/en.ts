@@ -1738,6 +1738,8 @@ const en = {
     emptyBody: "TASKS.md is ready, with the format at its top. Ask the agent to add the plan.",
     missingTitle: "TASKS.md is gone",
     missingBody: "The file was deleted or renamed. Ask the agent to create it again.",
+    goneTitle: "This project is gone",
+    goneBody: "It was deleted or replaced, so its tasks cannot be read any more. Close this window.",
     errorTitle: "TASKS.md cannot be read",
     retry: "Try again",
     readOnly: "Read-only · the agent keeps this file up to date",

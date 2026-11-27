@@ -1719,6 +1719,8 @@ const zhCN: typeof en = {
     emptyBody: "TASKS.md 已建好，格式写在文件开头。让 agent 把计划填进去。",
     missingTitle: "TASKS.md 不在了",
     missingBody: "文件被删除或改名了。让 agent 重新建一个。",
+    goneTitle: "这个项目已不存在",
+    goneBody: "项目被删除或重建了，读不到它的任务。关掉这个窗口即可。",
     errorTitle: "读不了 TASKS.md",
     retry: "重试",
     readOnly: "只读视图 · agent 负责更新这个文件",

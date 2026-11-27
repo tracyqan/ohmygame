@@ -44,6 +44,10 @@ export function TaskListPanel({ projectId }: { projectId: string }) {
       action={<Button size="sm" onClick={() => refreshTaskList(projectId)}>{t("taskList.retry")}</Button>} />
   </div>;
 
+  if (state.status === "gone") return <div className="task-list-notice">
+    <Empty icon={<TriangleAlert size={20} />} title={t("taskList.goneTitle")} description={t("taskList.goneBody")} />
+  </div>;
+
   if (state.status === "missing") return <div className="task-list-notice">
     <Empty icon={<ClipboardList size={20} />} title={t("taskList.missingTitle")} description={t("taskList.missingBody")}
       action={<Button size="sm" onClick={() => refreshTaskList(projectId)}>{t("taskList.retry")}</Button>} />
